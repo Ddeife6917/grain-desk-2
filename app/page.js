@@ -40,6 +40,8 @@ export default function Dashboard() {
     contractType: CONTRACT_TYPES[0],
     bushels: "",
     price: "",
+    lockedFutures: "",
+    lockedBasis: "",
     deliveryPeriod: "",
     elevator: "",
     dateEntered: todayISO(),
@@ -122,19 +124,35 @@ export default function Dashboard() {
     return contracts.map((c) => {
       const latest = latestByType[c.wheat_type];
       const currentCash = latest && latest.cash_price !== null ? Number(latest.cash_price) : null;
-      const isPriced = c.contract_type !== "Unpriced / Stored" && c.price !== null && c.price !== "";
+      const currentBasis = basisByType[c.wheat_type]?.value ?? null;
+      const futMarket = FUTURES_FOR_TYPE[c.wheat_type];
+      const currentFutures = latestFuturesByMarket[futMarket]?.futures_price ?? null;
+
+      // Fully locked (both legs known) only for Cash Forward contracts.
+      const isPriced = c.contract_type === "Cash Forward" && c.price !== null && c.price !== "";
+
+      // Hypothetical: if the still-open leg were priced right now, what
+      // would the final cash price come out to?
+      let whatIfPrice = null;
+      if (c.contract_type === "HTA (Hedge-to-Arrive)" && c.locked_futures !== null && c.locked_futures !== undefined && currentBasis !== null) {
+        whatIfPrice = Number(c.locked_futures) + currentBasis;
+      } else if (c.contract_type === "Basis Contract" && c.locked_basis !== null && c.locked_basis !== undefined && currentFutures !== null && currentFutures !== undefined) {
+        whatIfPrice = Number(c.locked_basis) + Number(currentFutures);
+      }
+
       const bu = Number(c.bushels) || 0;
-      let mtmValue = null, mtmDelta = null, beDelta = null;
+      let mtmValue = null, mtmDelta = null, beDelta = null, whatIfDelta = null;
       if (currentCash !== null) {
         mtmValue = bu * currentCash;
-        if (isPriced) mtmValue !== null && (mtmDelta = bu * Number(c.price) - mtmValue);
+        if (isPriced) mtmDelta = bu * Number(c.price) - mtmValue;
+        if (whatIfPrice !== null) whatIfDelta = bu * whatIfPrice - mtmValue;
       }
       const be = breakevens[c.wheat_type];
       if (be !== undefined && be !== null && be !== "") {
-        const refPrice = isPriced ? Number(c.price) : currentCash;
+        const refPrice = isPriced ? Number(c.price) : whatIfPrice !== null ? whatIfPrice : currentCash;
         if (refPrice !== null) beDelta = (refPrice - Number(be)) * bu;
       }
-      return { ...c, currentCash, isPriced, mtmValue, mtmDelta, beDelta };
+      return { ...c, currentCash, currentBasis, currentFutures, isPriced, whatIfPrice, mtmValue, mtmDelta, whatIfDelta, beDelta };
     });
   }, [contracts, latestByType, breakevens]);
 
@@ -161,7 +179,7 @@ export default function Dashboard() {
     else if (!has(basis) && has(futuresPrice) && has(cashPrice)) basis = (Number(cashPrice) - Number(futuresPrice)).toFixed(2);
     if (!has(futuresPrice) && !has(cashPrice) && !has(basis)) return;
 
-    await supabase.from("prices").insert([{
+    const { error } = await supabase.from("prices").insert([{
       date: priceForm.date,
       wheat_type: priceForm.wheatType,
       futures_market: priceForm.futuresMarket,
@@ -172,6 +190,7 @@ export default function Dashboard() {
       created_by: session.user.id,
       created_by_email: session.user.email,
     }]);
+    if (error) { alert("Couldn't save this price: " + error.message); return; }
     setPriceForm((f) => ({ ...f, futuresPrice: "", cashPrice: "", basis: "" }));
     loadAll();
   }
@@ -184,18 +203,21 @@ export default function Dashboard() {
   async function addContract(e) {
     e.preventDefault();
     if (contractForm.bushels === "") return;
-    await supabase.from("contracts").insert([{
+    const { error } = await supabase.from("contracts").insert([{
       user_id: session.user.id,
       wheat_type: contractForm.wheatType,
       contract_type: contractForm.contractType,
       bushels: Number(contractForm.bushels),
       price: contractForm.price !== "" ? Number(contractForm.price) : null,
+      locked_futures: contractForm.lockedFutures !== "" ? Number(contractForm.lockedFutures) : null,
+      locked_basis: contractForm.lockedBasis !== "" ? Number(contractForm.lockedBasis) : null,
       delivery_period: contractForm.deliveryPeriod || null,
       elevator: contractForm.elevator || null,
       date_entered: contractForm.dateEntered,
       notes: contractForm.notes || null,
     }]);
-    setContractForm((f) => ({ ...f, bushels: "", price: "", deliveryPeriod: "", notes: "" }));
+    if (error) { alert("Couldn't save this contract: " + error.message); return; }
+    setContractForm((f) => ({ ...f, bushels: "", price: "", lockedFutures: "", lockedBasis: "", deliveryPeriod: "", notes: "" }));
     loadAll();
   }
 
@@ -366,11 +388,21 @@ export default function Dashboard() {
                 </select>
               </Field>
               <Field label="Bushels"><input type="number" placeholder="5000" value={contractForm.bushels} onChange={(e) => setContractForm((f) => ({ ...f, bushels: e.target.value }))} /></Field>
-              <Field label="Contract price $/bu">
-                <input type="number" step="0.01" placeholder="leave blank if unpriced" value={contractForm.price}
-                  onChange={(e) => setContractForm((f) => ({ ...f, price: e.target.value }))}
-                  disabled={contractForm.contractType === "Unpriced / Stored"} />
-              </Field>
+              {contractForm.contractType === "Cash Forward" && (
+                <Field label="Locked cash price $/bu">
+                  <input type="number" step="0.01" placeholder="6.00" value={contractForm.price} onChange={(e) => setContractForm((f) => ({ ...f, price: e.target.value }))} />
+                </Field>
+              )}
+              {contractForm.contractType === "HTA (Hedge-to-Arrive)" && (
+                <Field label="Locked futures $/bu (basis still open)">
+                  <input type="number" step="0.01" placeholder="6.25" value={contractForm.lockedFutures} onChange={(e) => setContractForm((f) => ({ ...f, lockedFutures: e.target.value }))} />
+                </Field>
+              )}
+              {contractForm.contractType === "Basis Contract" && (
+                <Field label="Locked basis $/bu (futures still open)">
+                  <input type="number" step="0.01" placeholder="-0.45" value={contractForm.lockedBasis} onChange={(e) => setContractForm((f) => ({ ...f, lockedBasis: e.target.value }))} />
+                </Field>
+              )}
               <Field label="Delivery period"><input type="text" placeholder="Aug 2026" value={contractForm.deliveryPeriod} onChange={(e) => setContractForm((f) => ({ ...f, deliveryPeriod: e.target.value }))} /></Field>
               <Field label="Elevator"><input type="text" placeholder="Lauer" value={contractForm.elevator} onChange={(e) => setContractForm((f) => ({ ...f, elevator: e.target.value }))} /></Field>
               <Field label="Date entered"><input type="date" value={contractForm.dateEntered} onChange={(e) => setContractForm((f) => ({ ...f, dateEntered: e.target.value }))} /></Field>
@@ -380,15 +412,30 @@ export default function Dashboard() {
 
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Wheat</th><th>Type</th><th>Bu</th><th>Locked $</th><th>Current cash $</th><th>Delivery</th><th>Elevator</th><th>vs. market</th><th></th></tr></thead>
+                <thead><tr><th>Wheat</th><th>Type</th><th>Bu</th><th>Locked</th><th>What if priced now</th><th>Current cash $</th><th>Delivery</th><th>Elevator</th><th>vs. market</th><th></th></tr></thead>
                 <tbody>
-                  {contractStats.length === 0 && <tr><td colSpan={9} className="empty-row">No contracts yet.</td></tr>}
+                  {contractStats.length === 0 && <tr><td colSpan={10} className="empty-row">No contracts yet.</td></tr>}
                   {contractStats.map((c) => (
                     <tr key={c.id}>
                       <td className="mono">{c.wheat_type}</td>
                       <td className="mono">{c.contract_type}</td>
                       <td className="mono">{Number(c.bushels).toLocaleString()}</td>
-                      <td className="mono">{c.isPriced ? fmtC(c.price) : "Open"}</td>
+                      <td className="mono">
+                        {c.contract_type === "Cash Forward" && (c.isPriced ? fmtC(c.price) : "Open")}
+                        {c.contract_type === "HTA (Hedge-to-Arrive)" && (c.locked_futures !== null && c.locked_futures !== undefined ? `Fut ${fmtC(c.locked_futures)} · basis open` : "Open")}
+                        {c.contract_type === "Basis Contract" && (c.locked_basis !== null && c.locked_basis !== undefined ? `Basis ${fmtC(c.locked_basis)} · fut open` : "Open")}
+                        {c.contract_type === "Unpriced / Stored" && "Open"}
+                      </td>
+                      <td className="mono">
+                        {c.whatIfPrice !== null ? (
+                          <span>
+                            {fmtC(c.whatIfPrice)}
+                            {c.whatIfDelta !== null && (
+                              <span className={c.whatIfDelta > 0 ? "gain" : c.whatIfDelta < 0 ? "loss" : ""}> ({fmt$(c.whatIfDelta)})</span>
+                            )}
+                          </span>
+                        ) : "—"}
+                      </td>
                       <td className="mono">{fmtC(c.currentCash)}</td>
                       <td className="mono">{c.delivery_period || "—"}</td>
                       <td className="mono">{c.elevator || "—"}</td>
@@ -401,6 +448,9 @@ export default function Dashboard() {
                 </tbody>
               </table>
             </div>
+            <p className="mono note">
+              "What if priced now" applies to HTA contracts (futures locked, basis still open) and Basis Contracts (basis locked, futures still open) — it shows what your final cash price would be if you locked the still-open leg at today's market, with the $ gain/loss versus today's cash price in parentheses.
+            </p>
           </section>
         )}
 
