@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "../lib/supabaseClient";
 
@@ -24,6 +24,9 @@ export default function Dashboard() {
   const [contracts, setContracts] = useState([]);
   const [breakevens, setBreakevens] = useState({});
   const [tab, setTab] = useState("board");
+  const [deliveringId, setDeliveringId] = useState(null);
+  const [deliveryForm, setDeliveryForm] = useState({ date: todayISO(), finalPrice: "", finalFutures: "", finalBasis: "" });
+  const [showDelivered, setShowDelivered] = useState(false);
 
   const [priceForm, setPriceForm] = useState({
     date: todayISO(),
@@ -71,7 +74,7 @@ export default function Dashboard() {
     setPrices(priceRows || []);
     setContracts(contractRows || []);
     const beMap = {};
-    (beRows || []).forEach((r) => { beMap[r.wheat_type] = r.value; });
+    (beRows || []).forEach((r) => { beMap[r.wheat_type] = { value: r.value, expectedBushels: r.expected_bushels }; });
     setBreakevens(beMap);
   }, []);
 
@@ -147,18 +150,21 @@ export default function Dashboard() {
         if (isPriced) mtmDelta = bu * Number(c.price) - mtmValue;
         if (whatIfPrice !== null) whatIfDelta = bu * whatIfPrice - mtmValue;
       }
-      const be = breakevens[c.wheat_type];
+      const be = breakevens[c.wheat_type]?.value;
       if (be !== undefined && be !== null && be !== "") {
-        const refPrice = isPriced ? Number(c.price) : whatIfPrice !== null ? whatIfPrice : currentCash;
-        if (refPrice !== null) beDelta = (refPrice - Number(be)) * bu;
+        const refPrice = c.delivered ? Number(c.final_price) : isPriced ? Number(c.price) : whatIfPrice !== null ? whatIfPrice : currentCash;
+        if (refPrice !== null && refPrice !== undefined && !isNaN(refPrice)) beDelta = (refPrice - Number(be)) * bu;
       }
       return { ...c, currentCash, currentBasis, currentFutures, isPriced, whatIfPrice, mtmValue, mtmDelta, whatIfDelta, beDelta };
     });
-  }, [contracts, latestByType, breakevens]);
+  }, [contracts, latestByType, basisByType, latestFuturesByMarket, breakevens]);
+
+  const activeContracts = useMemo(() => contractStats.filter((c) => !c.delivered), [contractStats]);
+  const deliveredContracts = useMemo(() => contractStats.filter((c) => c.delivered), [contractStats]);
 
   const totals = useMemo(() => {
     let bu = 0, priceValueLocked = 0, marketValue = 0, mtm = 0, be = 0, haveMtm = false, haveBe = false;
-    contractStats.forEach((c) => {
+    activeContracts.forEach((c) => {
       const b = Number(c.bushels) || 0;
       bu += b;
       if (c.isPriced) priceValueLocked += b * Number(c.price);
@@ -167,7 +173,43 @@ export default function Dashboard() {
       if (c.beDelta !== null) { be += c.beDelta; haveBe = true; }
     });
     return { bu, priceValueLocked, marketValue, mtm, be, haveMtm, haveBe };
-  }, [contractStats]);
+  }, [activeContracts]);
+
+  // "Fully priced" = Cash Forward (priced) + any delivered contract, since the
+  // final price is actually known. HTA/Basis contracts count as "partially
+  // hedged" until delivered, since one leg is still open.
+  const perTypeStats = useMemo(() => {
+    const out = {};
+    WHEAT_TYPES.forEach((wt) => {
+      const rows = contractStats.filter((c) => c.wheat_type === wt);
+      let fullyPricedBu = 0, fullyPricedValue = 0, partiallyHedgedBu = 0, totalBu = 0;
+      rows.forEach((c) => {
+        const b = Number(c.bushels) || 0;
+        totalBu += b;
+        if (c.delivered) {
+          fullyPricedBu += b;
+          fullyPricedValue += b * Number(c.final_price);
+        } else if (c.contract_type === "Cash Forward" && c.isPriced) {
+          fullyPricedBu += b;
+          fullyPricedValue += b * Number(c.price);
+        } else if (c.contract_type === "HTA (Hedge-to-Arrive)" || c.contract_type === "Basis Contract") {
+          partiallyHedgedBu += b;
+        }
+      });
+      const expected = breakevens[wt]?.expectedBushels;
+      const hasExpected = expected !== undefined && expected !== null && expected !== "" && Number(expected) > 0;
+      out[wt] = {
+        totalBu,
+        fullyPricedBu,
+        partiallyHedgedBu,
+        blendedPrice: fullyPricedBu > 0 ? fullyPricedValue / fullyPricedBu : null,
+        pctPriced: hasExpected ? (fullyPricedBu / Number(expected)) * 100 : null,
+        pctHedged: hasExpected ? (partiallyHedgedBu / Number(expected)) * 100 : null,
+        expectedBushels: hasExpected ? Number(expected) : null,
+      };
+    });
+    return out;
+  }, [contractStats, breakevens]);
 
   // ---- actions ----
   async function addPrice(e) {
@@ -226,11 +268,55 @@ export default function Dashboard() {
     loadAll();
   }
 
+  function startDelivery(c) {
+    setDeliveringId(c.id);
+    setDeliveryForm({
+      date: todayISO(),
+      finalPrice: c.contract_type === "Cash Forward" ? (c.price ?? "") : "",
+      finalFutures: "",
+      finalBasis: "",
+    });
+  }
+
+  async function saveDelivery(c) {
+    let finalPrice = null;
+    const updates = { delivered: true, delivered_date: deliveryForm.date };
+
+    if (c.contract_type === "Cash Forward") {
+      finalPrice = deliveryForm.finalPrice !== "" ? Number(deliveryForm.finalPrice) : Number(c.price);
+    } else if (c.contract_type === "HTA (Hedge-to-Arrive)") {
+      if (deliveryForm.finalBasis === "") { alert("Enter the final basis at delivery."); return; }
+      updates.final_basis = Number(deliveryForm.finalBasis);
+      finalPrice = Number(c.locked_futures) + Number(deliveryForm.finalBasis);
+    } else if (c.contract_type === "Basis Contract") {
+      if (deliveryForm.finalFutures === "") { alert("Enter the final futures price at delivery."); return; }
+      updates.final_futures = Number(deliveryForm.finalFutures);
+      finalPrice = Number(c.locked_basis) + Number(deliveryForm.finalFutures);
+    } else {
+      // Unpriced / Stored — priced at the point of delivery
+      if (deliveryForm.finalPrice === "") { alert("Enter the final cash price received."); return; }
+      finalPrice = Number(deliveryForm.finalPrice);
+    }
+
+    updates.final_price = finalPrice;
+    const { error } = await supabase.from("contracts").update(updates).eq("id", c.id);
+    if (error) { alert("Couldn't save delivery: " + error.message); return; }
+    setDeliveringId(null);
+    loadAll();
+  }
+
   async function saveBreakeven(wheatType, value) {
-    setBreakevens((b) => ({ ...b, [wheatType]: value }));
-    if (value === "") return;
+    setBreakevens((b) => ({ ...b, [wheatType]: { ...b[wheatType], value } }));
     await supabase.from("breakevens").upsert(
-      { user_id: session.user.id, wheat_type: wheatType, value: Number(value) },
+      { user_id: session.user.id, wheat_type: wheatType, value: value === "" ? null : Number(value) },
+      { onConflict: "user_id,wheat_type" }
+    );
+  }
+
+  async function saveExpectedBushels(wheatType, expectedBushels) {
+    setBreakevens((b) => ({ ...b, [wheatType]: { ...b[wheatType], expectedBushels } }));
+    await supabase.from("breakevens").upsert(
+      { user_id: session.user.id, wheat_type: wheatType, expected_bushels: expectedBushels === "" ? null : Number(expectedBushels) },
       { onConflict: "user_id,wheat_type" }
     );
   }
@@ -300,8 +386,32 @@ export default function Dashboard() {
             </div>
           )}
           <p className="mono note">
-            "Locked vs. today's market" compares what you locked in on priced contracts to what those bushels would be worth at today's most recent cash price. Positive means your locked price beats today's market; negative means the market has moved above what you locked in.
+            "Locked vs. today's market" compares what you locked in on priced contracts to what those bushels would be worth at today's most recent cash price. Positive means your locked price beats today's market; negative means the market has moved above what you locked in. These totals reflect open contracts only — delivered/settled contracts are tracked separately in the Contract Ledger tab.
           </p>
+
+          <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+            {WHEAT_TYPES.map((wt) => {
+              const s = perTypeStats[wt];
+              if (!s || s.totalBu === 0) return null;
+              return (
+                <div key={wt} className="card">
+                  <div className="disp" style={{ fontSize: 13, textTransform: "uppercase", color: "var(--blue)", marginBottom: 8 }}>{wt}</div>
+                  <div className="stat-grid">
+                    <Stat
+                      label="% of crop priced"
+                      value={s.pctPriced !== null ? `${s.pctPriced.toFixed(0)}%` : "Set expected bu"}
+                    />
+                    <Stat
+                      label="% partially hedged"
+                      value={s.pctHedged !== null ? `${s.pctHedged.toFixed(0)}%` : "—"}
+                    />
+                    <Stat label="Blended avg. price" value={s.blendedPrice !== null ? fmtC(s.blendedPrice) : "—"} />
+                    <Stat label="Bu fully priced / total" value={`${s.fullyPricedBu.toLocaleString()} / ${s.expectedBushels ? s.expectedBushels.toLocaleString() : s.totalBu.toLocaleString()}`} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </section>
 
         <div className="tabs" style={{ marginTop: 32 }}>
@@ -325,6 +435,8 @@ export default function Dashboard() {
               </div>
               <a href="https://highlinegrain.com/cblocembed" target="_blank" rel="noopener noreferrer" className="btn btn-primary">Open bid board ↗</a>
             </div>
+
+            <BasisChart prices={prices} />
 
             <form onSubmit={addPrice} className="card form-grid">
               <Field label="Date"><input type="date" value={priceForm.date} onChange={(e) => setPriceForm((f) => ({ ...f, date: e.target.value }))} /></Field>
@@ -414,36 +526,73 @@ export default function Dashboard() {
               <table>
                 <thead><tr><th>Wheat</th><th>Type</th><th>Bu</th><th>Locked</th><th>What if priced now</th><th>Current cash $</th><th>Delivery</th><th>Elevator</th><th>vs. market</th><th></th></tr></thead>
                 <tbody>
-                  {contractStats.length === 0 && <tr><td colSpan={10} className="empty-row">No contracts yet.</td></tr>}
-                  {contractStats.map((c) => (
-                    <tr key={c.id}>
-                      <td className="mono">{c.wheat_type}</td>
-                      <td className="mono">{c.contract_type}</td>
-                      <td className="mono">{Number(c.bushels).toLocaleString()}</td>
-                      <td className="mono">
-                        {c.contract_type === "Cash Forward" && (c.isPriced ? fmtC(c.price) : "Open")}
-                        {c.contract_type === "HTA (Hedge-to-Arrive)" && (c.locked_futures !== null && c.locked_futures !== undefined ? `Fut ${fmtC(c.locked_futures)} · basis open` : "Open")}
-                        {c.contract_type === "Basis Contract" && (c.locked_basis !== null && c.locked_basis !== undefined ? `Basis ${fmtC(c.locked_basis)} · fut open` : "Open")}
-                        {c.contract_type === "Unpriced / Stored" && "Open"}
-                      </td>
-                      <td className="mono">
-                        {c.whatIfPrice !== null ? (
-                          <span>
-                            {fmtC(c.whatIfPrice)}
-                            {c.whatIfDelta !== null && (
-                              <span className={c.whatIfDelta > 0 ? "gain" : c.whatIfDelta < 0 ? "loss" : ""}> ({fmt$(c.whatIfDelta)})</span>
-                            )}
-                          </span>
-                        ) : "—"}
-                      </td>
-                      <td className="mono">{fmtC(c.currentCash)}</td>
-                      <td className="mono">{c.delivery_period || "—"}</td>
-                      <td className="mono">{c.elevator || "—"}</td>
-                      <td className="mono">
-                        {c.isPriced && c.mtmDelta !== null ? <span className={c.mtmDelta > 0 ? "gain" : c.mtmDelta < 0 ? "loss" : ""}>{fmt$(c.mtmDelta)}</span> : "—"}
-                      </td>
-                      <td><button onClick={() => deleteContract(c.id)} className="btn-link">Remove</button></td>
-                    </tr>
+                  {activeContracts.length === 0 && <tr><td colSpan={10} className="empty-row">No active contracts.</td></tr>}
+                  {activeContracts.map((c) => (
+                    <React.Fragment key={c.id}>
+                      <tr>
+                        <td className="mono">{c.wheat_type}</td>
+                        <td className="mono">{c.contract_type}</td>
+                        <td className="mono">{Number(c.bushels).toLocaleString()}</td>
+                        <td className="mono">
+                          {c.contract_type === "Cash Forward" && (c.isPriced ? fmtC(c.price) : "Open")}
+                          {c.contract_type === "HTA (Hedge-to-Arrive)" && (c.locked_futures !== null && c.locked_futures !== undefined ? `Fut ${fmtC(c.locked_futures)} · basis open` : "Open")}
+                          {c.contract_type === "Basis Contract" && (c.locked_basis !== null && c.locked_basis !== undefined ? `Basis ${fmtC(c.locked_basis)} · fut open` : "Open")}
+                          {c.contract_type === "Unpriced / Stored" && "Open"}
+                        </td>
+                        <td className="mono">
+                          {c.whatIfPrice !== null ? (
+                            <span>
+                              {fmtC(c.whatIfPrice)}
+                              {c.whatIfDelta !== null && (
+                                <span className={c.whatIfDelta > 0 ? "gain" : c.whatIfDelta < 0 ? "loss" : ""}> ({fmt$(c.whatIfDelta)})</span>
+                              )}
+                            </span>
+                          ) : "—"}
+                        </td>
+                        <td className="mono">{fmtC(c.currentCash)}</td>
+                        <td className="mono">{c.delivery_period || "—"}</td>
+                        <td className="mono">{c.elevator || "—"}</td>
+                        <td className="mono">
+                          {c.isPriced && c.mtmDelta !== null ? <span className={c.mtmDelta > 0 ? "gain" : c.mtmDelta < 0 ? "loss" : ""}>{fmt$(c.mtmDelta)}</span> : "—"}
+                        </td>
+                        <td style={{ display: "flex", gap: 8 }}>
+                          <button onClick={() => startDelivery(c)} className="btn-link" style={{ color: "var(--blue)" }}>Mark delivered</button>
+                          <button onClick={() => deleteContract(c.id)} className="btn-link">Remove</button>
+                        </td>
+                      </tr>
+                      {deliveringId === c.id && (
+                        <tr>
+                          <td colSpan={10}>
+                            <div className="card" style={{ background: "#FFFFFF" }}>
+                              <div className="form-grid">
+                                <Field label="Delivery date">
+                                  <input type="date" value={deliveryForm.date} onChange={(e) => setDeliveryForm((f) => ({ ...f, date: e.target.value }))} />
+                                </Field>
+                                {(c.contract_type === "Cash Forward" || c.contract_type === "Unpriced / Stored") && (
+                                  <Field label="Final cash price $/bu">
+                                    <input type="number" step="0.01" value={deliveryForm.finalPrice} onChange={(e) => setDeliveryForm((f) => ({ ...f, finalPrice: e.target.value }))} />
+                                  </Field>
+                                )}
+                                {c.contract_type === "HTA (Hedge-to-Arrive)" && (
+                                  <Field label="Final basis at delivery $/bu">
+                                    <input type="number" step="0.01" placeholder="e.g. -0.30" value={deliveryForm.finalBasis} onChange={(e) => setDeliveryForm((f) => ({ ...f, finalBasis: e.target.value }))} />
+                                  </Field>
+                                )}
+                                {c.contract_type === "Basis Contract" && (
+                                  <Field label="Final futures at delivery $/bu">
+                                    <input type="number" step="0.01" value={deliveryForm.finalFutures} onChange={(e) => setDeliveryForm((f) => ({ ...f, finalFutures: e.target.value }))} />
+                                  </Field>
+                                )}
+                                <div style={{ display: "flex", gap: 8 }}>
+                                  <button onClick={() => saveDelivery(c)} className="btn btn-primary">Save</button>
+                                  <button onClick={() => setDeliveringId(null)} className="btn-link">Cancel</button>
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>
@@ -451,21 +600,51 @@ export default function Dashboard() {
             <p className="mono note">
               "What if priced now" applies to HTA contracts (futures locked, basis still open) and Basis Contracts (basis locked, futures still open) — it shows what your final cash price would be if you locked the still-open leg at today's market, with the $ gain/loss versus today's cash price in parentheses.
             </p>
+
+            <button onClick={() => setShowDelivered((s) => !s)} className="disp tab" style={{ borderBottom: "none", paddingLeft: 0 }}>
+              {showDelivered ? "Hide" : "Show"} delivered contracts ({deliveredContracts.length})
+            </button>
+            {showDelivered && (
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>Wheat</th><th>Type</th><th>Bu</th><th>Final price</th><th>Delivered</th><th>vs. breakeven</th><th>Elevator</th></tr></thead>
+                  <tbody>
+                    {deliveredContracts.length === 0 && <tr><td colSpan={7} className="empty-row">No delivered contracts yet.</td></tr>}
+                    {deliveredContracts.map((c) => (
+                      <tr key={c.id}>
+                        <td className="mono">{c.wheat_type}</td>
+                        <td className="mono">{c.contract_type}</td>
+                        <td className="mono">{Number(c.bushels).toLocaleString()}</td>
+                        <td className="mono">{fmtC(c.final_price)}</td>
+                        <td className="mono">{c.delivered_date || "—"}</td>
+                        <td className="mono">
+                          {c.beDelta !== null ? <span className={c.beDelta > 0 ? "gain" : c.beDelta < 0 ? "loss" : ""}>{fmt$(c.beDelta)}</span> : "—"}
+                        </td>
+                        <td className="mono">{c.elevator || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
         )}
 
         {tab === "settings" && (
-          <section style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+          <section style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 24 }}>
             <p style={{ fontSize: 14, color: "var(--muted)", maxWidth: 560 }}>
-              Optional: enter your breakeven (cost of production) per bushel for each wheat type. This is private to your account.
+              Optional, per wheat type, private to your account. Your breakeven (cost of production) drives the "vs. breakeven" columns. Expected bushels drives the "% of crop priced" and blended price figures in Position Summary.
             </p>
-            <div className="stat-grid" style={{ maxWidth: 520 }}>
-              {WHEAT_TYPES.map((wt) => (
-                <Field key={wt} label={`${wt} breakeven $/bu`}>
-                  <input type="number" step="0.01" placeholder="e.g. 5.10" value={breakevens[wt] ?? ""} onChange={(e) => saveBreakeven(wt, e.target.value)} />
+            {WHEAT_TYPES.map((wt) => (
+              <div key={wt} className="stat-grid" style={{ maxWidth: 560 }}>
+                <Field label={`${wt} breakeven $/bu`}>
+                  <input type="number" step="0.01" placeholder="e.g. 5.10" value={breakevens[wt]?.value ?? ""} onChange={(e) => saveBreakeven(wt, e.target.value)} />
                 </Field>
-              ))}
-            </div>
+                <Field label={`${wt} expected bushels this year`}>
+                  <input type="number" placeholder="e.g. 40000" value={breakevens[wt]?.expectedBushels ?? ""} onChange={(e) => saveExpectedBushels(wt, e.target.value)} />
+                </Field>
+              </div>
+            ))}
           </section>
         )}
       </main>
@@ -492,5 +671,78 @@ function Field({ label, children }) {
       <div className="mono field-label">{label}</div>
       {children}
     </label>
+  );
+}
+
+function BasisChart({ prices }) {
+  const width = 640, height = 200, padding = 34;
+  const colors = { "Soft White Winter": "#F2994A", "Hard Red Winter": "#1D5D9B" };
+
+  const series = WHEAT_TYPES.map((wt) => ({
+    wt,
+    color: colors[wt],
+    points: prices
+      .filter((r) => r.wheat_type === wt && r.basis !== null && r.basis !== undefined)
+      .sort((a, b) => (a.date < b.date ? -1 : 1)),
+  }));
+
+  const allPoints = series.flatMap((s) => s.points);
+  if (allPoints.length < 2) {
+    return (
+      <div className="card">
+        <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Basis Over Time</h3>
+        <p className="mono" style={{ fontSize: 12, color: "var(--muted2)", marginTop: 8 }}>
+          Log basis (or both cash and futures) on at least two different dates to see a trend line here.
+        </p>
+      </div>
+    );
+  }
+
+  const dates = allPoints.map((p) => new Date(p.date).getTime());
+  const minDate = Math.min(...dates), maxDate = Math.max(...dates);
+  const basisVals = allPoints.map((p) => Number(p.basis));
+  let minB = Math.min(...basisVals), maxB = Math.max(...basisVals);
+  if (minB === maxB) { minB -= 0.1; maxB += 0.1; }
+  const pad = (maxB - minB) * 0.15;
+  minB -= pad; maxB += pad;
+
+  const xScale = (d) => {
+    const t = new Date(d).getTime();
+    if (maxDate === minDate) return padding + (width - 2 * padding) / 2;
+    return padding + ((t - minDate) / (maxDate - minDate)) * (width - 2 * padding);
+  };
+  const yScale = (v) => height - padding - ((v - minB) / (maxB - minB)) * (height - 2 * padding);
+
+  return (
+    <div className="card">
+      <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Basis Over Time</h3>
+      <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", height: "auto", marginTop: 8 }}>
+        {minB < 0 && maxB > 0 && (
+          <line x1={padding} x2={width - padding} y1={yScale(0)} y2={yScale(0)} style={{ stroke: "var(--border)" }} strokeDasharray="4 4" />
+        )}
+        <text x={4} y={padding} className="mono" style={{ fontSize: 10, fill: "var(--muted2)" }}>{fmtC(maxB)}</text>
+        <text x={4} y={height - padding + 4} className="mono" style={{ fontSize: 10, fill: "var(--muted2)" }}>{fmtC(minB)}</text>
+        {series.map((s) => s.points.length >= 2 && (
+          <polyline
+            key={s.wt}
+            fill="none"
+            strokeWidth="2"
+            style={{ stroke: s.color }}
+            points={s.points.map((p) => `${xScale(p.date)},${yScale(Number(p.basis))}`).join(" ")}
+          />
+        ))}
+        {series.map((s) => s.points.map((p, i) => (
+          <circle key={s.wt + i} cx={xScale(p.date)} cy={yScale(Number(p.basis))} r="3" style={{ fill: s.color }} />
+        )))}
+      </svg>
+      <div style={{ display: "flex", gap: 16, marginTop: 8, flexWrap: "wrap" }}>
+        {series.map((s) => (
+          <div key={s.wt} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ width: 10, height: 10, background: s.color, borderRadius: 2, display: "inline-block" }}></span>
+            <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{s.wt}</span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
