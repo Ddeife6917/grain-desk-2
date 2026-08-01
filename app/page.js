@@ -675,7 +675,7 @@ function Field({ label, children }) {
 }
 
 function BasisChart({ prices }) {
-  const width = 640, height = 200, padding = 34;
+  const width = 640, height = 260, padLeft = 56, padRight = 16, padTop = 16, padBottom = 40;
   const colors = { "Soft White Winter": "#F2994A", "Hard Red Winter": "#1D5D9B" };
 
   const series = WHEAT_TYPES.map((wt) => ({
@@ -706,22 +706,54 @@ function BasisChart({ prices }) {
   const pad = (maxB - minB) * 0.15;
   minB -= pad; maxB += pad;
 
+  const plotW = width - padLeft - padRight;
+  const plotH = height - padTop - padBottom;
+
   const xScale = (d) => {
     const t = new Date(d).getTime();
-    if (maxDate === minDate) return padding + (width - 2 * padding) / 2;
-    return padding + ((t - minDate) / (maxDate - minDate)) * (width - 2 * padding);
+    if (maxDate === minDate) return padLeft + plotW / 2;
+    return padLeft + ((t - minDate) / (maxDate - minDate)) * plotW;
   };
-  const yScale = (v) => height - padding - ((v - minB) / (maxB - minB)) * (height - 2 * padding);
+  const yScale = (v) => padTop + plotH - ((v - minB) / (maxB - minB)) * plotH;
+
+  // Horizontal gridlines with a value label at each level.
+  const gridLevels = 4;
+  const gridValues = Array.from({ length: gridLevels + 1 }, (_, i) => minB + (i / gridLevels) * (maxB - minB));
+
+  // One date label per unique date across both series, so labels don't repeat
+  // when both wheat types were logged the same day.
+  const uniqueDates = [...new Set(allPoints.map((p) => p.date))].sort();
+  const formatDate = (d) => {
+    const dt = new Date(d + "T00:00:00");
+    return dt.toLocaleDateString(undefined, { month: "numeric", day: "numeric" });
+  };
 
   return (
     <div className="card">
       <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Basis Over Time</h3>
       <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", height: "auto", marginTop: 8 }}>
-        {minB < 0 && maxB > 0 && (
-          <line x1={padding} x2={width - padding} y1={yScale(0)} y2={yScale(0)} style={{ stroke: "var(--border)" }} strokeDasharray="4 4" />
-        )}
-        <text x={4} y={padding} className="mono" style={{ fontSize: 10, fill: "var(--muted2)" }}>{fmtC(maxB)}</text>
-        <text x={4} y={height - padding + 4} className="mono" style={{ fontSize: 10, fill: "var(--muted2)" }}>{fmtC(minB)}</text>
+        {gridValues.map((v, i) => (
+          <g key={i}>
+            <line x1={padLeft} x2={width - padRight} y1={yScale(v)} y2={yScale(v)} style={{ stroke: "var(--border)" }} strokeDasharray={Math.abs(v) < 1e-9 ? "0" : "3 3"} strokeWidth={Math.abs(v) < 1e-9 ? 1.5 : 1} />
+            <text x={padLeft - 6} y={yScale(v) + 3} textAnchor="end" className="mono" style={{ fontSize: 10, fill: "var(--muted2)" }}>{fmtC(v)}</text>
+          </g>
+        ))}
+
+        {uniqueDates.map((d, i) => (
+          <g key={d}>
+            <line x1={xScale(d)} x2={xScale(d)} y1={padTop} y2={height - padBottom} style={{ stroke: "var(--border)" }} strokeDasharray="2 4" strokeWidth={0.75} />
+            <text
+              x={xScale(d)}
+              y={height - padBottom + 16}
+              textAnchor="middle"
+              className="mono"
+              style={{ fontSize: 10, fill: "var(--muted2)" }}
+            >
+              {formatDate(d)}
+            </text>
+          </g>
+        ))}
+
         {series.map((s) => s.points.length >= 2 && (
           <polyline
             key={s.wt}
