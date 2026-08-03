@@ -406,7 +406,7 @@ export default function Dashboard() {
                       value={s.pctHedged !== null ? `${s.pctHedged.toFixed(0)}%` : "—"}
                     />
                     <Stat label="Blended avg. price" value={s.blendedPrice !== null ? fmtC(s.blendedPrice) : "—"} />
-                    <Stat label="Bu fully priced / total" value={`${s.fullyPricedBu.toLocaleString()} / ${s.expectedBushels ? s.expectedBushels.toLocaleString() : s.totalBu.toLocaleString()}`} />
+                    <Stat label="Bu fully priced / total" value={`${s.fullyPricedBu.toLocaleString()} / ${s.totalBu.toLocaleString()}`} />
                   </div>
                 </div>
               );
