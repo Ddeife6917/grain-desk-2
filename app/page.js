@@ -18,7 +18,7 @@ const fmtC = (n) => {
 // Parses labels like "Aug 2026" into a rough date so we can find the
 // soonest one. Unparseable labels sort last rather than breaking.
 function parseMonthLabel(label) {
-  const d = new Date(label + " 1");
+  const d = new Date("1 " + label.trim());
   return isNaN(d.getTime()) ? new Date(8640000000000000) : d;
 }
 
@@ -1188,11 +1188,34 @@ function BasisChart({ prices, trackedMonths }) {
   const colors = { "Soft White Winter": "#F2994A", "Hard Red Winter": "#1D5D9B" };
 
   const series = WHEAT_TYPES.map((wt) => {
-    const nearest = getNearestMonth(trackedMonths, wt);
-    const points = prices
-      .filter((r) => r.wheat_type === wt && r.basis !== null && r.basis !== undefined && (nearest ? r.delivery_month === nearest : !r.delivery_month))
-      .sort((a, b) => (a.date < b.date ? -1 : 1));
-    return { wt, color: colors[wt], nearest, points };
+    const months = trackedMonths[wt] || [];
+    const today = new Date(); today.setDate(1);
+    const sortedByProximity = [...months].sort((a, b) => {
+      const da = parseMonthLabel(a), db = parseMonthLabel(b);
+      const futureA = da >= today, futureB = db >= today;
+      if (futureA && !futureB) return -1;
+      if (!futureA && futureB) return 1;
+      return futureA ? da - db : db - da;
+    });
+
+    // Use the nearest tracked month that actually has 2+ logged basis
+    // points; fall back through the rest, then to general/nearby.
+    let chosen = null;
+    let points = [];
+    for (const m of sortedByProximity) {
+      const pts = prices
+        .filter((r) => r.wheat_type === wt && r.basis !== null && r.basis !== undefined && r.delivery_month === m)
+        .sort((a, b) => (a.date < b.date ? -1 : 1));
+      if (pts.length >= 2) { chosen = m; points = pts; break; }
+    }
+    if (!chosen) {
+      const generalPts = prices
+        .filter((r) => r.wheat_type === wt && r.basis !== null && r.basis !== undefined && !r.delivery_month)
+        .sort((a, b) => (a.date < b.date ? -1 : 1));
+      if (generalPts.length >= 2) points = generalPts;
+    }
+
+    return { wt, color: colors[wt], nearest: chosen, points };
   });
 
   const allPoints = series.flatMap((s) => s.points);
