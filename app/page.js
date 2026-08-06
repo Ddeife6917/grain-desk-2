@@ -34,6 +34,39 @@ function getNearestMonth(trackedMonths, wheatType) {
   return withDates.sort((a, b) => b.d - a.d)[0].m;
 }
 
+// "General/nearby" price: the latest logged entry with no specific
+// delivery month attached.
+function getGeneralPrice(prices, wheatType) {
+  const rows = prices.filter((r) => r.wheat_type === wheatType && !r.delivery_month).sort((a, b) => (a.date < b.date ? 1 : -1));
+  if (rows.length === 0) return null;
+  const cashRow = rows.find((r) => r.cash_price !== null && r.cash_price !== undefined);
+  const futRow = rows.find((r) => r.futures_price !== null && r.futures_price !== undefined);
+  const basisRow = rows.find((r) => r.basis !== null && r.basis !== undefined);
+  return {
+    cashPrice: cashRow ? Number(cashRow.cash_price) : null,
+    futuresPrice: futRow ? Number(futRow.futures_price) : null,
+    futuresMarket: futRow ? futRow.futures_market : null,
+    basis: basisRow ? Number(basisRow.basis) : null,
+    date: rows[0].date,
+  };
+}
+
+// Prefers the nearest tracked delivery month's price; falls back to
+// general/nearby only if that month has no data logged yet. This is
+// what keeps a later-dated but far-out month (e.g. December) from
+// overriding a nearer one (e.g. August) just because it was logged more
+// recently.
+function getBestPrice(prices, wheatType, nearestMonth) {
+  if (nearestMonth) {
+    const mp = getMonthPrice(prices, wheatType, nearestMonth);
+    if (mp && (mp.cashPrice !== null || mp.futuresPrice !== null || mp.basis !== null)) {
+      return { ...mp, month: nearestMonth };
+    }
+  }
+  const gp = getGeneralPrice(prices, wheatType);
+  return gp ? { ...gp, month: null } : null;
+}
+
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
 // Finds the most recent price row for a wheat type + specific delivery
@@ -147,56 +180,46 @@ export default function Dashboard() {
   }, [session, loadAll]);
 
   // ---- derived ----
-  const latestByType = useMemo(() => {
+  const nearestMonthByType = useMemo(() => {
     const out = {};
-    WHEAT_TYPES.forEach((wt) => {
-      const rows = prices.filter((r) => r.wheat_type === wt).sort((a, b) => (a.date < b.date ? 1 : -1));
-      out[wt] = rows[0] || null;
-    });
+    WHEAT_TYPES.forEach((wt) => { out[wt] = getNearestMonth(trackedMonths, wt); });
     return out;
-  }, [prices]);
+  }, [trackedMonths]);
+
+  const bestPriceByType = useMemo(() => {
+    const out = {};
+    WHEAT_TYPES.forEach((wt) => { out[wt] = getBestPrice(prices, wt, nearestMonthByType[wt]); });
+    return out;
+  }, [prices, nearestMonthByType]);
 
   const sortedPrices = useMemo(() => [...prices].sort((a, b) => (a.date < b.date ? 1 : -1)), [prices]);
-
-  const latestFuturesByMarket = useMemo(() => {
-    const out = {};
-    FUTURES_MARKETS.forEach((m) => {
-      const rows = prices
-        .filter((r) => r.futures_market === m && r.futures_price !== null && r.futures_price !== undefined)
-        .sort((a, b) => (a.date < b.date ? 1 : -1));
-      out[m] = rows[0] || null;
-    });
-    return out;
-  }, [prices]);
 
   const basisByType = useMemo(() => {
     const out = {};
     WHEAT_TYPES.forEach((wt) => {
-      const cashRow = latestByType[wt];
-      const futMarket = FUTURES_FOR_TYPE[wt];
-      const futRow = latestFuturesByMarket[futMarket];
-      const cash = cashRow && cashRow.cash_price !== null ? Number(cashRow.cash_price) : null;
-      const fut = futRow && futRow.futures_price !== null ? Number(futRow.futures_price) : null;
+      const best = bestPriceByType[wt];
+      const cash = best?.cashPrice ?? null;
+      const fut = best?.futuresPrice ?? null;
+      const value = best?.basis !== null && best?.basis !== undefined ? best.basis : (cash !== null && fut !== null ? cash - fut : null);
       out[wt] = {
-        value: cash !== null && fut !== null ? cash - fut : null,
-        cashDate: cashRow ? cashRow.date : null,
-        futDate: futRow ? futRow.date : null,
-        futMarket,
+        value,
+        cashDate: best?.date ?? null,
+        futDate: best?.date ?? null,
+        futMarket: best?.futuresMarket || FUTURES_FOR_TYPE[wt],
       };
     });
     return out;
-  }, [latestByType, latestFuturesByMarket]);
+  }, [bestPriceByType]);
 
   const contractStats = useMemo(() => {
     return contracts.map((c) => {
       const monthPrice = getMonthPrice(prices, c.wheat_type, c.delivery_period);
       const usingMonthPrice = monthPrice !== null && (monthPrice.cashPrice !== null || monthPrice.futuresPrice !== null || monthPrice.basis !== null);
 
-      const latest = latestByType[c.wheat_type];
-      const generalCash = latest && latest.cash_price !== null ? Number(latest.cash_price) : null;
-      const generalBasis = basisByType[c.wheat_type]?.value ?? null;
-      const futMarket = FUTURES_FOR_TYPE[c.wheat_type];
-      const generalFutures = latestFuturesByMarket[futMarket]?.futures_price ?? null;
+      const best = bestPriceByType[c.wheat_type];
+      const generalCash = best?.cashPrice ?? null;
+      const generalBasis = best?.basis !== null && best?.basis !== undefined ? best.basis : (best?.cashPrice !== null && best?.futuresPrice !== null && best?.cashPrice !== undefined && best?.futuresPrice !== undefined ? best.cashPrice - best.futuresPrice : null);
+      const generalFutures = best?.futuresPrice ?? null;
 
       const currentCash = usingMonthPrice && monthPrice.cashPrice !== null ? monthPrice.cashPrice : generalCash;
       const currentBasis = usingMonthPrice && monthPrice.basis !== null ? monthPrice.basis : generalBasis;
@@ -228,7 +251,7 @@ export default function Dashboard() {
       }
       return { ...c, currentCash, currentBasis, currentFutures, isPriced, whatIfPrice, mtmValue, mtmDelta, whatIfDelta, beDelta, usingMonthPrice };
     });
-  }, [contracts, prices, latestByType, basisByType, latestFuturesByMarket, breakevens]);
+  }, [contracts, prices, bestPriceByType, breakevens]);
 
   const activeContracts = useMemo(() => contractStats.filter((c) => !c.delivered), [contractStats]);
   const deliveredContracts = useMemo(() => contractStats.filter((c) => c.delivered), [contractStats]);
@@ -563,10 +586,10 @@ export default function Dashboard() {
         <div className="ticker">
           <div className="wrap ticker-grid">
             {[
-              { label: "CBOT Wheat (SRW)", val: latestFuturesByMarket[FUTURES_MARKETS[0]]?.futures_price },
-              { label: "KC HRW Wheat", val: latestFuturesByMarket[FUTURES_MARKETS[1]]?.futures_price },
-              { label: "Cash · Soft White", val: latestByType["Soft White Winter"]?.cash_price },
-              { label: "Cash · Hard Red", val: latestByType["Hard Red Winter"]?.cash_price },
+              { label: "CBOT Wheat (SRW)", val: bestPriceByType["Soft White Winter"]?.futuresPrice },
+              { label: "KC HRW Wheat", val: bestPriceByType["Hard Red Winter"]?.futuresPrice },
+              { label: "Cash · Soft White", val: bestPriceByType["Soft White Winter"]?.cashPrice },
+              { label: "Cash · Hard Red", val: bestPriceByType["Hard Red Winter"]?.cashPrice },
             ].map((t, i) => (
               <div key={i}>
                 <div className="mono tile-label">{t.label}</div>
@@ -582,7 +605,9 @@ export default function Dashboard() {
                   {basisByType[wt].value !== null ? (basisByType[wt].value >= 0 ? "+" : "") + fmtC(basisByType[wt].value) : "—"}
                 </div>
                 <div className="mono tile-sub">
-                  {basisByType[wt].value !== null ? `cash ${basisByType[wt].cashDate} vs. ${basisByType[wt].futMarket} ${basisByType[wt].futDate}` : "needs cash & futures"}
+                  {basisByType[wt].value !== null
+                    ? `${bestPriceByType[wt]?.month || "general/nearby"} · as of ${basisByType[wt].cashDate}`
+                    : "needs cash & futures"}
                 </div>
               </div>
             ))}
