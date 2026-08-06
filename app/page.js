@@ -892,7 +892,10 @@ export default function Dashboard() {
                           {c.whatIfPrice !== null ? (
                             <span>
                               {fmtC(c.whatIfPrice)}
-                              {c.whatIfDelta !== null && (
+                              {c.contract_type === "Unpriced / Stored" && c.mtmValue !== null && (
+                                <span style={{ color: "var(--muted)" }}> ({fmt$(c.mtmValue)} total)</span>
+                              )}
+                              {c.contract_type !== "Unpriced / Stored" && c.whatIfDelta !== null && (
                                 <span className={c.whatIfDelta > 0 ? "gain" : c.whatIfDelta < 0 ? "loss" : ""}> ({fmt$(c.whatIfDelta)})</span>
                               )}
                             </span>
@@ -1070,7 +1073,7 @@ export default function Dashboard() {
               </table>
             </div>
             <p className="mono note">
-              "What if priced now" shows what you'd get if you locked in the remaining open piece of a contract at today's market. For HTA and Basis Contracts, it fills in whichever leg (futures or basis) is still open, with the $ gain/loss versus today's cash price in parentheses. For Unpriced/Stored, it's simply today's cash price. Cash Forward contracts are already fully locked, so there's nothing to show here.
+              "What if priced now" shows what you'd get if you locked in the remaining open piece of a contract at today's market. For HTA and Basis Contracts, it fills in whichever leg (futures or basis) is still open, with the $ gain/loss versus today's cash price in parentheses. For Unpriced/Stored, it's today's cash price along with what that specific batch of bushels would be worth in total if sold right now. Cash Forward contracts are already fully locked, so there's nothing to show here.
             </p>
 
             <button onClick={() => setShowDelivered((s) => !s)} className="disp tab" style={{ borderBottom: "none", paddingLeft: 0 }}>
