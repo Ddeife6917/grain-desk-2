@@ -97,6 +97,9 @@ export default function Dashboard() {
   const [contracts, setContracts] = useState([]);
   const [breakevens, setBreakevens] = useState({});
   const [trackedMonths, setTrackedMonths] = useState({}); // { wheatType: ["Aug 2026", ...] }
+  const [cropYears, setCropYears] = useState([]);
+  const [selectedYear, setSelectedYear] = useState(null);
+  const [newYearInput, setNewYearInput] = useState("");
   const [newMonthInput, setNewMonthInput] = useState({ "Soft White Winter": "", "Hard Red Winter": "" });
   const [tab, setTab] = useState("board");
   const [deliveringId, setDeliveringId] = useState(null);
@@ -110,7 +113,7 @@ export default function Dashboard() {
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({
     wheatType: WHEAT_TYPES[0], contractType: CONTRACT_TYPES[0], bushels: "", price: "",
-    lockedFutures: "", lockedBasis: "", deliveryPeriod: "", elevator: "", dateEntered: todayISO(), notes: "",
+    lockedFutures: "", lockedBasis: "", deliveryPeriod: "", elevator: "", dateEntered: todayISO(), notes: "", cropYear: "",
   });
 
   const [editingPriceId, setEditingPriceId] = useState(null);
@@ -158,21 +161,29 @@ export default function Dashboard() {
 
   // ---- data loading ----
   const loadAll = useCallback(async () => {
-    const [{ data: priceRows }, { data: contractRows }, { data: beRows }, { data: monthRows }] = await Promise.all([
+    const [{ data: priceRows }, { data: contractRows }, { data: beRows }, { data: monthRows }, { data: yearRows }] = await Promise.all([
       supabase.from("prices").select("*").order("date", { ascending: false }),
       supabase.from("contracts").select("*").order("date_entered", { ascending: false }),
       supabase.from("breakevens").select("*"),
       supabase.from("tracked_months").select("*").order("sort_order", { ascending: true }),
+      supabase.from("crop_years").select("*").order("year_label", { ascending: false }),
     ]);
     setPrices(priceRows || []);
     setContracts(contractRows || []);
     const beMap = {};
-    (beRows || []).forEach((r) => { beMap[r.wheat_type] = { value: r.value, expectedBushels: r.expected_bushels }; });
+    (beRows || []).forEach((r) => {
+      const yr = r.crop_year || "unassigned";
+      (beMap[yr] ||= {})[r.wheat_type] = { value: r.value, expectedBushels: r.expected_bushels };
+    });
     setBreakevens(beMap);
     const monthMap = {};
     WHEAT_TYPES.forEach((wt) => { monthMap[wt] = []; });
     (monthRows || []).forEach((r) => { (monthMap[r.wheat_type] ||= []).push(r.month_label); });
     setTrackedMonths(monthMap);
+
+    const years = (yearRows || []).map((r) => r.year_label);
+    setCropYears(years);
+    setSelectedYear((prev) => (prev && years.includes(prev) ? prev : years[0] || null));
   }, []);
 
   useEffect(() => {
@@ -246,7 +257,7 @@ export default function Dashboard() {
         if (isPriced) mtmDelta = bu * Number(c.price) - mtmValue;
         if (whatIfPrice !== null) whatIfDelta = bu * whatIfPrice - mtmValue;
       }
-      const be = breakevens[c.wheat_type]?.value;
+      const be = breakevens[c.crop_year || "unassigned"]?.[c.wheat_type]?.value;
       if (be !== undefined && be !== null && be !== "") {
         const refPrice = c.delivered ? Number(c.final_price) : isPriced ? Number(c.price) : whatIfPrice !== null ? whatIfPrice : currentCash;
         if (refPrice !== null && refPrice !== undefined && !isNaN(refPrice)) beDelta = (refPrice - Number(be)) * bu;
@@ -255,8 +266,9 @@ export default function Dashboard() {
     });
   }, [contracts, prices, bestPriceByType, breakevens]);
 
-  const activeContracts = useMemo(() => contractStats.filter((c) => !c.delivered), [contractStats]);
-  const deliveredContracts = useMemo(() => contractStats.filter((c) => c.delivered), [contractStats]);
+  const yearContractStats = useMemo(() => contractStats.filter((c) => c.crop_year === selectedYear), [contractStats, selectedYear]);
+  const activeContracts = useMemo(() => yearContractStats.filter((c) => !c.delivered), [yearContractStats]);
+  const deliveredContracts = useMemo(() => yearContractStats.filter((c) => c.delivered), [yearContractStats]);
 
   const totals = useMemo(() => {
     let bu = 0, priceValueLocked = 0, marketValue = 0, mtm = 0, be = 0, haveMtm = false, haveBe = false;
@@ -277,7 +289,7 @@ export default function Dashboard() {
   const perTypeStats = useMemo(() => {
     const out = {};
     WHEAT_TYPES.forEach((wt) => {
-      const rows = contractStats.filter((c) => c.wheat_type === wt);
+      const rows = yearContractStats.filter((c) => c.wheat_type === wt);
       let fullyPricedBu = 0, fullyPricedValue = 0, partiallyHedgedBu = 0, totalBu = 0;
       rows.forEach((c) => {
         const b = Number(c.bushels) || 0;
@@ -292,7 +304,7 @@ export default function Dashboard() {
           partiallyHedgedBu += b;
         }
       });
-      const expected = breakevens[wt]?.expectedBushels;
+      const expected = breakevens[selectedYear]?.[wt]?.expectedBushels;
       const hasExpected = expected !== undefined && expected !== null && expected !== "" && Number(expected) > 0;
       out[wt] = {
         totalBu,
@@ -305,7 +317,7 @@ export default function Dashboard() {
       };
     });
     return out;
-  }, [contractStats, breakevens]);
+  }, [yearContractStats, breakevens, selectedYear]);
 
   // ---- actions ----
   async function addPrice(e) {
@@ -379,8 +391,10 @@ export default function Dashboard() {
   async function addContract(e) {
     e.preventDefault();
     if (contractForm.bushels === "") return;
+    if (!selectedYear) { alert("Add a crop year first (above the Contract Ledger)."); return; }
     const { error } = await supabase.from("contracts").insert([{
       user_id: session.user.id,
+      crop_year: selectedYear,
       wheat_type: contractForm.wheatType,
       contract_type: contractForm.contractType,
       bushels: Number(contractForm.bushels),
@@ -461,6 +475,7 @@ export default function Dashboard() {
 
     const newContract = {
       user_id: session.user.id,
+      crop_year: c.crop_year || null,
       wheat_type: c.wheat_type,
       contract_type: splitForm.contractType,
       bushels: bu,
@@ -506,6 +521,7 @@ export default function Dashboard() {
       elevator: c.elevator || "",
       dateEntered: c.date_entered || todayISO(),
       notes: c.notes || "",
+      cropYear: c.crop_year || selectedYear || "",
     });
   }
 
@@ -514,6 +530,7 @@ export default function Dashboard() {
 
     const updates = {
       wheat_type: editForm.wheatType,
+      crop_year: editForm.cropYear || null,
       contract_type: editForm.contractType,
       bushels: Number(editForm.bushels),
       price: editForm.contractType === "Cash Forward" && editForm.price !== "" ? Number(editForm.price) : null,
@@ -528,6 +545,30 @@ export default function Dashboard() {
     const { error } = await supabase.from("contracts").update(updates).eq("id", c.id);
     if (error) { alert("Couldn't save changes: " + error.message); return; }
     setEditingId(null);
+    loadAll();
+  }
+
+  async function addCropYear() {
+    const label = newYearInput.trim();
+    if (!label) return;
+    if (cropYears.includes(label)) { setNewYearInput(""); setSelectedYear(label); return; }
+    const { error } = await supabase.from("crop_years").insert([{ year_label: label }]);
+    if (error) { alert("Couldn't add year: " + error.message); return; }
+    setNewYearInput("");
+    await loadAll();
+    setSelectedYear(label);
+  }
+
+  async function removeCropYear(label) {
+    const hasContracts = contracts.some((c) => c.crop_year === label);
+    const hasBreakevens = Object.values(breakevens[label] || {}).some((v) => (v.value ?? "") !== "" || (v.expectedBushels ?? "") !== "");
+    if (hasContracts || hasBreakevens) {
+      alert(`"${label}" still has contracts or breakeven settings. Remove or reassign those first before deleting the year.`);
+      return;
+    }
+    if (!confirm(`Remove crop year "${label}"? This can't be undone.`)) return;
+    const { error } = await supabase.from("crop_years").delete().eq("year_label", label);
+    if (error) { alert("Couldn't remove year: " + error.message); return; }
     loadAll();
   }
 
@@ -550,18 +591,20 @@ export default function Dashboard() {
   }
 
   async function saveBreakeven(wheatType, value) {
-    setBreakevens((b) => ({ ...b, [wheatType]: { ...b[wheatType], value } }));
+    if (!selectedYear) { alert("Add a crop year first."); return; }
+    setBreakevens((b) => ({ ...b, [selectedYear]: { ...b[selectedYear], [wheatType]: { ...b[selectedYear]?.[wheatType], value } } }));
     await supabase.from("breakevens").upsert(
-      { user_id: session.user.id, wheat_type: wheatType, value: value === "" ? null : Number(value) },
-      { onConflict: "user_id,wheat_type" }
+      { user_id: session.user.id, wheat_type: wheatType, crop_year: selectedYear, value: value === "" ? null : Number(value) },
+      { onConflict: "user_id,wheat_type,crop_year" }
     );
   }
 
   async function saveExpectedBushels(wheatType, expectedBushels) {
-    setBreakevens((b) => ({ ...b, [wheatType]: { ...b[wheatType], expectedBushels } }));
+    if (!selectedYear) { alert("Add a crop year first."); return; }
+    setBreakevens((b) => ({ ...b, [selectedYear]: { ...b[selectedYear], [wheatType]: { ...b[selectedYear]?.[wheatType], expectedBushels } } }));
     await supabase.from("breakevens").upsert(
-      { user_id: session.user.id, wheat_type: wheatType, expected_bushels: expectedBushels === "" ? null : Number(expectedBushels) },
-      { onConflict: "user_id,wheat_type" }
+      { user_id: session.user.id, wheat_type: wheatType, crop_year: selectedYear, expected_bushels: expectedBushels === "" ? null : Number(expectedBushels) },
+      { onConflict: "user_id,wheat_type,crop_year" }
     );
   }
 
@@ -618,8 +661,50 @@ export default function Dashboard() {
       </header>
 
       <main className="wrap">
+        <div className="card" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 24 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span className="mono" style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)" }}>Crop Year</span>
+            {cropYears.length === 0 && <span className="mono" style={{ fontSize: 12, color: "var(--muted2)" }}>None yet — add one to the right.</span>}
+            {cropYears.map((y) => (
+              <button
+                key={y}
+                onClick={() => setSelectedYear(y)}
+                className="disp"
+                style={{
+                  fontSize: 13,
+                  padding: "6px 14px",
+                  borderRadius: 6,
+                  border: "1px solid var(--border)",
+                  background: y === selectedYear ? "var(--blue)" : "#FFFFFF",
+                  color: y === selectedYear ? "#FFFFFF" : "var(--ink)",
+                  cursor: "pointer",
+                }}
+              >
+                {y}
+              </button>
+            ))}
+            {selectedYear && (
+              <button onClick={() => removeCropYear(selectedYear)} className="btn-link" style={{ fontSize: 11 }}>Remove "{selectedYear}"</button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              type="text"
+              placeholder="e.g. 2026"
+              value={newYearInput}
+              onChange={(e) => setNewYearInput(e.target.value)}
+              style={{ maxWidth: 110 }}
+            />
+            <button onClick={addCropYear} className="btn btn-primary" style={{ padding: "6px 14px" }}>Add year</button>
+          </div>
+        </div>
+
+        {!selectedYear ? (
+          <p className="mono" style={{ color: "var(--muted2)", marginBottom: 24 }}>Add a crop year above to start logging contracts and breakevens for it.</p>
+        ) : (
+        <>
         <section>
-          <h2 className="disp section-title">Position Summary</h2>
+          <h2 className="disp section-title">Position Summary — {selectedYear}</h2>
           <div className="stat-grid">
             <Stat label="Bushels tracked" value={totals.bu.toLocaleString()} />
             <Stat label="Bu priced value" value={fmt$(totals.priceValueLocked)} />
@@ -1113,14 +1198,16 @@ export default function Dashboard() {
             {WHEAT_TYPES.map((wt) => (
               <div key={wt} className="stat-grid" style={{ maxWidth: 560 }}>
                 <Field label={`${wt} breakeven $/bu`}>
-                  <input type="number" step="0.01" placeholder="e.g. 5.10" value={breakevens[wt]?.value ?? ""} onChange={(e) => saveBreakeven(wt, e.target.value)} />
+                  <input type="number" step="0.01" placeholder="e.g. 5.10" value={breakevens[selectedYear]?.[wt]?.value ?? ""} onChange={(e) => saveBreakeven(wt, e.target.value)} />
                 </Field>
                 <Field label={`${wt} expected bushels this year`}>
-                  <input type="number" placeholder="e.g. 40000" value={breakevens[wt]?.expectedBushels ?? ""} onChange={(e) => saveExpectedBushels(wt, e.target.value)} />
+                  <input type="number" placeholder="e.g. 40000" value={breakevens[selectedYear]?.[wt]?.expectedBushels ?? ""} onChange={(e) => saveExpectedBushels(wt, e.target.value)} />
                 </Field>
               </div>
             ))}
           </section>
+        )}
+        </>
         )}
       </main>
 
