@@ -235,6 +235,8 @@ export default function Dashboard() {
         whatIfPrice = Number(c.locked_futures) + currentBasis;
       } else if (c.contract_type === "Basis Contract" && c.locked_basis !== null && c.locked_basis !== undefined && currentFutures !== null && currentFutures !== undefined) {
         whatIfPrice = Number(c.locked_basis) + Number(currentFutures);
+      } else if (c.contract_type === "Unpriced / Stored" && currentCash !== null) {
+        whatIfPrice = currentCash;
       }
 
       const bu = Number(c.bushels) || 0;
@@ -1068,7 +1070,7 @@ export default function Dashboard() {
               </table>
             </div>
             <p className="mono note">
-              "What if priced now" applies to HTA contracts (futures locked, basis still open) and Basis Contracts (basis locked, futures still open) — it shows what your final cash price would be if you locked the still-open leg at today's market, with the $ gain/loss versus today's cash price in parentheses.
+              "What if priced now" shows what you'd get if you locked in the remaining open piece of a contract at today's market. For HTA and Basis Contracts, it fills in whichever leg (futures or basis) is still open, with the $ gain/loss versus today's cash price in parentheses. For Unpriced/Stored, it's simply today's cash price. Cash Forward contracts are already fully locked, so there's nothing to show here.
             </p>
 
             <button onClick={() => setShowDelivered((s) => !s)} className="disp tab" style={{ borderBottom: "none", paddingLeft: 0 }}>
