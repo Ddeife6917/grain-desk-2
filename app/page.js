@@ -80,6 +80,12 @@ export default function Dashboard() {
     lockedFutures: "", lockedBasis: "", deliveryPeriod: "", elevator: "", dateEntered: todayISO(), notes: "",
   });
 
+  const [editingPriceId, setEditingPriceId] = useState(null);
+  const [editPriceForm, setEditPriceForm] = useState({
+    date: todayISO(), wheatType: WHEAT_TYPES[0], deliveryMonth: "", futuresMarket: FUTURES_MARKETS[0],
+    futuresPrice: "", cashPrice: "", basis: "", elevator: "",
+  });
+
   const [priceForm, setPriceForm] = useState({
     date: todayISO(),
     wheatType: WHEAT_TYPES[0],
@@ -305,6 +311,43 @@ export default function Dashboard() {
 
   async function deletePrice(id) {
     await supabase.from("prices").delete().eq("id", id);
+    loadAll();
+  }
+
+  function startEditPrice(r) {
+    setEditingPriceId(r.id);
+    setEditPriceForm({
+      date: r.date,
+      wheatType: r.wheat_type,
+      deliveryMonth: r.delivery_month || "",
+      futuresMarket: r.futures_market || FUTURES_MARKETS[0],
+      futuresPrice: r.futures_price ?? "",
+      cashPrice: r.cash_price ?? "",
+      basis: r.basis ?? "",
+      elevator: r.elevator || "",
+    });
+  }
+
+  async function saveEditPrice(r) {
+    let { futuresPrice, cashPrice, basis } = editPriceForm;
+    const has = (v) => v !== "" && v !== null && !isNaN(v);
+    if (!has(futuresPrice) && has(cashPrice) && has(basis)) futuresPrice = (Number(cashPrice) - Number(basis)).toFixed(2);
+    else if (!has(cashPrice) && has(futuresPrice) && has(basis)) cashPrice = (Number(futuresPrice) + Number(basis)).toFixed(2);
+    else if (!has(basis) && has(futuresPrice) && has(cashPrice)) basis = (Number(cashPrice) - Number(futuresPrice)).toFixed(2);
+    if (!has(futuresPrice) && !has(cashPrice) && !has(basis)) { alert("Enter at least one price."); return; }
+
+    const { error } = await supabase.from("prices").update({
+      date: editPriceForm.date,
+      wheat_type: editPriceForm.wheatType,
+      delivery_month: editPriceForm.deliveryMonth || null,
+      futures_market: editPriceForm.futuresMarket,
+      futures_price: has(futuresPrice) ? Number(futuresPrice) : null,
+      cash_price: has(cashPrice) ? Number(cashPrice) : null,
+      basis: has(basis) ? Number(basis) : null,
+      elevator: editPriceForm.elevator || null,
+    }).eq("id", r.id);
+    if (error) { alert("Couldn't save changes: " + error.message); return; }
+    setEditingPriceId(null);
     loadAll();
   }
 
@@ -678,25 +721,76 @@ export default function Dashboard() {
 
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Date</th><th>Wheat</th><th>Futures</th><th>Futures $</th><th>Cash $</th><th>Basis</th><th>Elevator</th><th>Logged</th><th></th></tr></thead>
+                <thead><tr><th>Date</th><th>Wheat</th><th>Month</th><th>Futures</th><th>Futures $</th><th>Cash $</th><th>Basis</th><th>Elevator</th><th>Logged</th><th></th></tr></thead>
                 <tbody>
-                  {sortedPrices.length === 0 && <tr><td colSpan={9} className="empty-row">No prices logged yet.</td></tr>}
+                  {sortedPrices.length === 0 && <tr><td colSpan={10} className="empty-row">No prices logged yet.</td></tr>}
                   {sortedPrices.map((r) => (
-                    <tr key={r.id}>
-                      <td className="mono">{r.date}</td>
-                      <td className="mono">{r.wheat_type}</td>
-                      <td className="mono">{r.futures_market}</td>
-                      <td className="mono">{fmtC(r.futures_price)}</td>
-                      <td className="mono">{fmtC(r.cash_price)}</td>
-                      <td className="mono">{fmtC(r.basis)}</td>
-                      <td className="mono">{r.elevator || "—"}</td>
-                      <td className="mono" style={{ fontSize: 11, color: "var(--muted2)" }}>
-                        {r.created_by_email ? r.created_by_email.split("@")[0] : "—"}
-                        <br />
-                        {r.created_at ? new Date(r.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : ""}
-                      </td>
-                      <td><button onClick={() => deletePrice(r.id)} className="btn-link">Remove</button></td>
-                    </tr>
+                    <React.Fragment key={r.id}>
+                      <tr>
+                        <td className="mono">{r.date}</td>
+                        <td className="mono">{r.wheat_type}</td>
+                        <td className="mono">{r.delivery_month || "general/nearby"}</td>
+                        <td className="mono">{r.futures_market}</td>
+                        <td className="mono">{fmtC(r.futures_price)}</td>
+                        <td className="mono">{fmtC(r.cash_price)}</td>
+                        <td className="mono">{fmtC(r.basis)}</td>
+                        <td className="mono">{r.elevator || "—"}</td>
+                        <td className="mono" style={{ fontSize: 11, color: "var(--muted2)" }}>
+                          {r.created_by_email ? r.created_by_email.split("@")[0] : "—"}
+                          <br />
+                          {r.created_at ? new Date(r.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : ""}
+                        </td>
+                        <td style={{ display: "flex", gap: 8 }}>
+                          <button onClick={() => startEditPrice(r)} className="btn-link" style={{ color: "var(--blue)" }}>Edit</button>
+                          <button onClick={() => deletePrice(r.id)} className="btn-link">Remove</button>
+                        </td>
+                      </tr>
+                      {editingPriceId === r.id && (
+                        <tr>
+                          <td colSpan={10}>
+                            <div className="card" style={{ background: "#FFFFFF" }}>
+                              <div className="form-grid">
+                                <Field label="Date">
+                                  <input type="date" value={editPriceForm.date} onChange={(e) => setEditPriceForm((f) => ({ ...f, date: e.target.value }))} />
+                                </Field>
+                                <Field label="Wheat type">
+                                  <select value={editPriceForm.wheatType} onChange={(e) => setEditPriceForm((f) => ({ ...f, wheatType: e.target.value }))}>
+                                    {WHEAT_TYPES.map((w) => <option key={w}>{w}</option>)}
+                                  </select>
+                                </Field>
+                                <Field label="Delivery month">
+                                  <select value={editPriceForm.deliveryMonth} onChange={(e) => setEditPriceForm((f) => ({ ...f, deliveryMonth: e.target.value }))}>
+                                    <option value="">General / nearby</option>
+                                    {(trackedMonths[editPriceForm.wheatType] || []).map((m) => <option key={m}>{m}</option>)}
+                                  </select>
+                                </Field>
+                                <Field label="Futures market">
+                                  <select value={editPriceForm.futuresMarket} onChange={(e) => setEditPriceForm((f) => ({ ...f, futuresMarket: e.target.value }))}>
+                                    {FUTURES_MARKETS.map((w) => <option key={w}>{w}</option>)}
+                                  </select>
+                                </Field>
+                                <Field label="Futures $/bu">
+                                  <input type="number" step="0.01" value={editPriceForm.futuresPrice} onChange={(e) => setEditPriceForm((f) => ({ ...f, futuresPrice: e.target.value }))} />
+                                </Field>
+                                <Field label="Local cash $/bu">
+                                  <input type="number" step="0.01" value={editPriceForm.cashPrice} onChange={(e) => setEditPriceForm((f) => ({ ...f, cashPrice: e.target.value }))} />
+                                </Field>
+                                <Field label="Basis">
+                                  <input type="number" step="0.01" value={editPriceForm.basis} onChange={(e) => setEditPriceForm((f) => ({ ...f, basis: e.target.value }))} />
+                                </Field>
+                                <Field label="Elevator">
+                                  <input type="text" value={editPriceForm.elevator} onChange={(e) => setEditPriceForm((f) => ({ ...f, elevator: e.target.value }))} />
+                                </Field>
+                                <div style={{ display: "flex", gap: 8 }}>
+                                  <button onClick={() => saveEditPrice(r)} className="btn btn-primary">Save</button>
+                                  <button onClick={() => setEditingPriceId(null)} className="btn-link">Cancel</button>
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>
