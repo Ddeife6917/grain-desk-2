@@ -27,6 +27,11 @@ export default function Dashboard() {
   const [deliveringId, setDeliveringId] = useState(null);
   const [deliveryForm, setDeliveryForm] = useState({ date: todayISO(), finalPrice: "", finalFutures: "", finalBasis: "" });
   const [showDelivered, setShowDelivered] = useState(false);
+  const [splittingId, setSplittingId] = useState(null);
+  const [splitForm, setSplitForm] = useState({
+    bushels: "", contractType: "Cash Forward", price: "", lockedFutures: "", lockedBasis: "",
+    elevator: "", deliveryPeriod: "", dateEntered: todayISO(),
+  });
 
   const [priceForm, setPriceForm] = useState({
     date: todayISO(),
@@ -305,6 +310,60 @@ export default function Dashboard() {
     loadAll();
   }
 
+  function startSplit(c) {
+    setSplittingId(c.id);
+    setSplitForm({
+      bushels: "",
+      contractType: "Cash Forward",
+      price: "",
+      lockedFutures: "",
+      lockedBasis: "",
+      elevator: c.elevator || "",
+      deliveryPeriod: c.delivery_period || "",
+      dateEntered: todayISO(),
+    });
+  }
+
+  async function saveSplit(c) {
+    const bu = Number(splitForm.bushels);
+    const available = Number(c.bushels);
+    if (!bu || bu <= 0) { alert("Enter how many bushels to price."); return; }
+    if (bu > available) { alert(`Only ${available.toLocaleString()} bu are available on this contract.`); return; }
+
+    const newContract = {
+      user_id: session.user.id,
+      wheat_type: c.wheat_type,
+      contract_type: splitForm.contractType,
+      bushels: bu,
+      price: splitForm.contractType === "Cash Forward" && splitForm.price !== "" ? Number(splitForm.price) : null,
+      locked_futures: splitForm.contractType === "HTA (Hedge-to-Arrive)" && splitForm.lockedFutures !== "" ? Number(splitForm.lockedFutures) : null,
+      locked_basis: splitForm.contractType === "Basis Contract" && splitForm.lockedBasis !== "" ? Number(splitForm.lockedBasis) : null,
+      delivery_period: splitForm.deliveryPeriod || null,
+      elevator: splitForm.elevator || null,
+      date_entered: splitForm.dateEntered,
+      notes: c.notes || null,
+    };
+
+    if (splitForm.contractType === "Cash Forward" && newContract.price === null) { alert("Enter the locked cash price."); return; }
+    if (splitForm.contractType === "HTA (Hedge-to-Arrive)" && newContract.locked_futures === null) { alert("Enter the locked futures price."); return; }
+    if (splitForm.contractType === "Basis Contract" && newContract.locked_basis === null) { alert("Enter the locked basis."); return; }
+
+    const { error: insertError } = await supabase.from("contracts").insert([newContract]);
+    if (insertError) { alert("Couldn't create the new contract: " + insertError.message); return; }
+
+    const remaining = available - bu;
+    if (remaining <= 0) {
+      const { error: delError } = await supabase.from("contracts").delete().eq("id", c.id);
+      if (delError) { alert("New contract was created, but couldn't update the original: " + delError.message); }
+    } else {
+      const { error: updError } = await supabase.from("contracts").update({ bushels: remaining }).eq("id", c.id);
+      if (updError) { alert("New contract was created, but couldn't update the original: " + updError.message); }
+    }
+
+    setSplittingId(null);
+    loadAll();
+  }
+
   async function saveBreakeven(wheatType, value) {
     setBreakevens((b) => ({ ...b, [wheatType]: { ...b[wheatType], value } }));
     await supabase.from("breakevens").upsert(
@@ -555,11 +614,65 @@ export default function Dashboard() {
                         <td className="mono">
                           {c.isPriced && c.mtmDelta !== null ? <span className={c.mtmDelta > 0 ? "gain" : c.mtmDelta < 0 ? "loss" : ""}>{fmt$(c.mtmDelta)}</span> : "—"}
                         </td>
-                        <td style={{ display: "flex", gap: 8 }}>
+                        <td style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          {c.contract_type === "Unpriced / Stored" && (
+                            <button onClick={() => startSplit(c)} className="btn-link" style={{ color: "var(--orange)" }}>Price this</button>
+                          )}
                           <button onClick={() => startDelivery(c)} className="btn-link" style={{ color: "var(--blue)" }}>Mark delivered</button>
                           <button onClick={() => deleteContract(c.id)} className="btn-link">Remove</button>
                         </td>
                       </tr>
+                      {splittingId === c.id && (
+                        <tr>
+                          <td colSpan={10}>
+                            <div className="card" style={{ background: "#FFFFFF" }}>
+                              <p className="mono note" style={{ marginTop: 0 }}>
+                                Pulls bushels out of this Unpriced/Stored contract ({Number(c.bushels).toLocaleString()} bu available) and creates a new priced contract with them. The elevator and delivery period below are pre-filled from this contract — edit if the new contract is going somewhere different.
+                              </p>
+                              <div className="form-grid">
+                                <Field label={`Bushels to price (max ${Number(c.bushels).toLocaleString()})`}>
+                                  <input type="number" value={splitForm.bushels} onChange={(e) => setSplitForm((f) => ({ ...f, bushels: e.target.value }))} />
+                                </Field>
+                                <Field label="New contract type">
+                                  <select value={splitForm.contractType} onChange={(e) => setSplitForm((f) => ({ ...f, contractType: e.target.value }))}>
+                                    <option>Cash Forward</option>
+                                    <option>HTA (Hedge-to-Arrive)</option>
+                                    <option>Basis Contract</option>
+                                  </select>
+                                </Field>
+                                {splitForm.contractType === "Cash Forward" && (
+                                  <Field label="Locked cash price $/bu">
+                                    <input type="number" step="0.01" value={splitForm.price} onChange={(e) => setSplitForm((f) => ({ ...f, price: e.target.value }))} />
+                                  </Field>
+                                )}
+                                {splitForm.contractType === "HTA (Hedge-to-Arrive)" && (
+                                  <Field label="Locked futures $/bu (basis still open)">
+                                    <input type="number" step="0.01" value={splitForm.lockedFutures} onChange={(e) => setSplitForm((f) => ({ ...f, lockedFutures: e.target.value }))} />
+                                  </Field>
+                                )}
+                                {splitForm.contractType === "Basis Contract" && (
+                                  <Field label="Locked basis $/bu (futures still open)">
+                                    <input type="number" step="0.01" value={splitForm.lockedBasis} onChange={(e) => setSplitForm((f) => ({ ...f, lockedBasis: e.target.value }))} />
+                                  </Field>
+                                )}
+                                <Field label="Elevator">
+                                  <input type="text" value={splitForm.elevator} onChange={(e) => setSplitForm((f) => ({ ...f, elevator: e.target.value }))} />
+                                </Field>
+                                <Field label="Delivery period">
+                                  <input type="text" value={splitForm.deliveryPeriod} onChange={(e) => setSplitForm((f) => ({ ...f, deliveryPeriod: e.target.value }))} />
+                                </Field>
+                                <Field label="Date entered">
+                                  <input type="date" value={splitForm.dateEntered} onChange={(e) => setSplitForm((f) => ({ ...f, dateEntered: e.target.value }))} />
+                                </Field>
+                                <div style={{ display: "flex", gap: 8 }}>
+                                  <button onClick={() => saveSplit(c)} className="btn btn-primary">Save</button>
+                                  <button onClick={() => setSplittingId(null)} className="btn-link">Cancel</button>
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
                       {deliveringId === c.id && (
                         <tr>
                           <td colSpan={10}>
