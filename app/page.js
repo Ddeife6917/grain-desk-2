@@ -32,6 +32,11 @@ export default function Dashboard() {
     bushels: "", contractType: "Cash Forward", price: "", lockedFutures: "", lockedBasis: "",
     elevator: "", deliveryPeriod: "", dateEntered: todayISO(),
   });
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({
+    wheatType: WHEAT_TYPES[0], contractType: CONTRACT_TYPES[0], bushels: "", price: "",
+    lockedFutures: "", lockedBasis: "", deliveryPeriod: "", elevator: "", dateEntered: todayISO(), notes: "",
+  });
 
   const [priceForm, setPriceForm] = useState({
     date: todayISO(),
@@ -364,6 +369,44 @@ export default function Dashboard() {
     loadAll();
   }
 
+  function startEdit(c) {
+    setEditingId(c.id);
+    setEditForm({
+      wheatType: c.wheat_type,
+      contractType: c.contract_type,
+      bushels: c.bushels ?? "",
+      price: c.price ?? "",
+      lockedFutures: c.locked_futures ?? "",
+      lockedBasis: c.locked_basis ?? "",
+      deliveryPeriod: c.delivery_period || "",
+      elevator: c.elevator || "",
+      dateEntered: c.date_entered || todayISO(),
+      notes: c.notes || "",
+    });
+  }
+
+  async function saveEdit(c) {
+    if (editForm.bushels === "" || Number(editForm.bushels) <= 0) { alert("Enter a valid bushel amount."); return; }
+
+    const updates = {
+      wheat_type: editForm.wheatType,
+      contract_type: editForm.contractType,
+      bushels: Number(editForm.bushels),
+      price: editForm.contractType === "Cash Forward" && editForm.price !== "" ? Number(editForm.price) : null,
+      locked_futures: editForm.contractType === "HTA (Hedge-to-Arrive)" && editForm.lockedFutures !== "" ? Number(editForm.lockedFutures) : null,
+      locked_basis: editForm.contractType === "Basis Contract" && editForm.lockedBasis !== "" ? Number(editForm.lockedBasis) : null,
+      delivery_period: editForm.deliveryPeriod || null,
+      elevator: editForm.elevator || null,
+      date_entered: editForm.dateEntered,
+      notes: editForm.notes || null,
+    };
+
+    const { error } = await supabase.from("contracts").update(updates).eq("id", c.id);
+    if (error) { alert("Couldn't save changes: " + error.message); return; }
+    setEditingId(null);
+    loadAll();
+  }
+
   async function saveBreakeven(wheatType, value) {
     setBreakevens((b) => ({ ...b, [wheatType]: { ...b[wheatType], value } }));
     await supabase.from("breakevens").upsert(
@@ -616,6 +659,7 @@ export default function Dashboard() {
                           {c.isPriced && c.mtmDelta !== null ? <span className={c.mtmDelta > 0 ? "gain" : c.mtmDelta < 0 ? "loss" : ""}>{fmt$(c.mtmDelta)}</span> : "—"}
                         </td>
                         <td style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <button onClick={() => startEdit(c)} className="btn-link" style={{ color: "var(--muted)" }}>Edit</button>
                           {c.contract_type === "Unpriced / Stored" && (
                             <button onClick={() => startSplit(c)} className="btn-link" style={{ color: "var(--orange)" }}>Price this</button>
                           )}
@@ -623,6 +667,60 @@ export default function Dashboard() {
                           <button onClick={() => deleteContract(c.id)} className="btn-link">Remove</button>
                         </td>
                       </tr>
+                      {editingId === c.id && (
+                        <tr>
+                          <td colSpan={11}>
+                            <div className="card" style={{ background: "#FFFFFF" }}>
+                              <div className="form-grid">
+                                <Field label="Wheat type">
+                                  <select value={editForm.wheatType} onChange={(e) => setEditForm((f) => ({ ...f, wheatType: e.target.value }))}>
+                                    {WHEAT_TYPES.map((w) => <option key={w}>{w}</option>)}
+                                  </select>
+                                </Field>
+                                <Field label="Contract type">
+                                  <select value={editForm.contractType} onChange={(e) => setEditForm((f) => ({ ...f, contractType: e.target.value }))}>
+                                    {CONTRACT_TYPES.map((w) => <option key={w}>{w}</option>)}
+                                  </select>
+                                </Field>
+                                <Field label="Bushels">
+                                  <input type="number" value={editForm.bushels} onChange={(e) => setEditForm((f) => ({ ...f, bushels: e.target.value }))} />
+                                </Field>
+                                {editForm.contractType === "Cash Forward" && (
+                                  <Field label="Locked cash price $/bu">
+                                    <input type="number" step="0.01" value={editForm.price} onChange={(e) => setEditForm((f) => ({ ...f, price: e.target.value }))} />
+                                  </Field>
+                                )}
+                                {editForm.contractType === "HTA (Hedge-to-Arrive)" && (
+                                  <Field label="Locked futures $/bu (basis still open)">
+                                    <input type="number" step="0.01" value={editForm.lockedFutures} onChange={(e) => setEditForm((f) => ({ ...f, lockedFutures: e.target.value }))} />
+                                  </Field>
+                                )}
+                                {editForm.contractType === "Basis Contract" && (
+                                  <Field label="Locked basis $/bu (futures still open)">
+                                    <input type="number" step="0.01" value={editForm.lockedBasis} onChange={(e) => setEditForm((f) => ({ ...f, lockedBasis: e.target.value }))} />
+                                  </Field>
+                                )}
+                                <Field label="Delivery period">
+                                  <input type="text" value={editForm.deliveryPeriod} onChange={(e) => setEditForm((f) => ({ ...f, deliveryPeriod: e.target.value }))} />
+                                </Field>
+                                <Field label="Elevator">
+                                  <input type="text" value={editForm.elevator} onChange={(e) => setEditForm((f) => ({ ...f, elevator: e.target.value }))} />
+                                </Field>
+                                <Field label="Date entered">
+                                  <input type="date" value={editForm.dateEntered} onChange={(e) => setEditForm((f) => ({ ...f, dateEntered: e.target.value }))} />
+                                </Field>
+                                <Field label="Notes">
+                                  <input type="text" value={editForm.notes} onChange={(e) => setEditForm((f) => ({ ...f, notes: e.target.value }))} />
+                                </Field>
+                                <div style={{ display: "flex", gap: 8 }}>
+                                  <button onClick={() => saveEdit(c)} className="btn btn-primary">Save</button>
+                                  <button onClick={() => setEditingId(null)} className="btn-link">Cancel</button>
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
                       {splittingId === c.id && (
                         <tr>
                           <td colSpan={11}>
