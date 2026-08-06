@@ -559,19 +559,6 @@ export default function Dashboard() {
     setSelectedYear(label);
   }
 
-  async function removeCropYear(label) {
-    const hasContracts = contracts.some((c) => c.crop_year === label);
-    const hasBreakevens = Object.values(breakevens[label] || {}).some((v) => (v.value ?? "") !== "" || (v.expectedBushels ?? "") !== "");
-    if (hasContracts || hasBreakevens) {
-      alert(`"${label}" still has contracts or breakeven settings. Remove or reassign those first before deleting the year.`);
-      return;
-    }
-    if (!confirm(`Remove crop year "${label}"? This can't be undone.`)) return;
-    const { error } = await supabase.from("crop_years").delete().eq("year_label", label);
-    if (error) { alert("Couldn't remove year: " + error.message); return; }
-    loadAll();
-  }
-
   async function addTrackedMonth(wheatType) {
     const label = (newMonthInput[wheatType] || "").trim();
     if (!label) return;
@@ -683,9 +670,6 @@ export default function Dashboard() {
                 {y}
               </button>
             ))}
-            {selectedYear && (
-              <button onClick={() => removeCropYear(selectedYear)} className="btn-link" style={{ fontSize: 11 }}>Remove "{selectedYear}"</button>
-            )}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <input
