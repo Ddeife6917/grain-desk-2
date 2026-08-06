@@ -607,7 +607,8 @@ export default function Dashboard() {
     <div>
       <header className="header">
         <div className="wrap header-top">
-          <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <img src="/logo.png" alt="" width={36} height={36} style={{ borderRadius: 8, display: "block" }} />
             <span className="disp brand">Grain Desk</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -1212,7 +1213,7 @@ function Stat({ label, value, tone, wide }) {
   );
 }
 function DeliveryMonthPrices({ prices, trackedMonths }) {
-  const colors = { "Soft White Winter": "#F2994A", "Hard Red Winter": "#1D5D9B" };
+  const colors = { "Soft White Winter": "#C9942F", "Hard Red Winter": "#1D5D9B" };
   const rows = [];
   WHEAT_TYPES.forEach((wt) => {
     (trackedMonths[wt] || []).forEach((month) => {
@@ -1269,7 +1270,7 @@ function Field({ label, children }) {
 
 function BasisChart({ prices, trackedMonths }) {
   const width = 640, height = 260, padLeft = 56, padRight = 16, padTop = 16, padBottom = 40;
-  const colors = { "Soft White Winter": "#F2994A", "Hard Red Winter": "#1D5D9B" };
+  const colors = { "Soft White Winter": "#C9942F", "Hard Red Winter": "#1D5D9B" };
 
   const series = WHEAT_TYPES.map((wt) => {
     const months = trackedMonths[wt] || [];
