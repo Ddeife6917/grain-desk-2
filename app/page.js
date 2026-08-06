@@ -15,6 +15,25 @@ const fmtC = (n) => {
   const num = Number(n);
   return (num < 0 ? "-$" : "$") + Math.abs(num).toFixed(2);
 };
+// Parses labels like "Aug 2026" into a rough date so we can find the
+// soonest one. Unparseable labels sort last rather than breaking.
+function parseMonthLabel(label) {
+  const d = new Date(label + " 1");
+  return isNaN(d.getTime()) ? new Date(8640000000000000) : d;
+}
+
+function getNearestMonth(trackedMonths, wheatType) {
+  const months = trackedMonths[wheatType] || [];
+  if (months.length === 0) return null;
+  const today = new Date();
+  today.setDate(1); // compare at month granularity
+  const withDates = months.map((m) => ({ m, d: parseMonthLabel(m) }));
+  const future = withDates.filter((x) => x.d >= today).sort((a, b) => a.d - b.d);
+  if (future.length > 0) return future[0].m;
+  // all tracked months are in the past — fall back to the most recent one
+  return withDates.sort((a, b) => b.d - a.d)[0].m;
+}
+
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
 // Finds the most recent price row for a wheat type + specific delivery
@@ -593,7 +612,7 @@ export default function Dashboard() {
               <a href="https://highlinegrain.com/cblocembed" target="_blank" rel="noopener noreferrer" className="btn btn-primary">Open bid board ↗</a>
             </div>
 
-            <BasisChart prices={prices} />
+            <BasisChart prices={prices} trackedMonths={trackedMonths} />
 
             <div className="card">
               <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Tracked Delivery Months</h3>
@@ -1045,17 +1064,17 @@ function Field({ label, children }) {
   );
 }
 
-function BasisChart({ prices }) {
+function BasisChart({ prices, trackedMonths }) {
   const width = 640, height = 260, padLeft = 56, padRight = 16, padTop = 16, padBottom = 40;
   const colors = { "Soft White Winter": "#F2994A", "Hard Red Winter": "#1D5D9B" };
 
-  const series = WHEAT_TYPES.map((wt) => ({
-    wt,
-    color: colors[wt],
-    points: prices
-      .filter((r) => r.wheat_type === wt && r.basis !== null && r.basis !== undefined)
-      .sort((a, b) => (a.date < b.date ? -1 : 1)),
-  }));
+  const series = WHEAT_TYPES.map((wt) => {
+    const nearest = getNearestMonth(trackedMonths, wt);
+    const points = prices
+      .filter((r) => r.wheat_type === wt && r.basis !== null && r.basis !== undefined && (nearest ? r.delivery_month === nearest : !r.delivery_month))
+      .sort((a, b) => (a.date < b.date ? -1 : 1));
+    return { wt, color: colors[wt], nearest, points };
+  });
 
   const allPoints = series.flatMap((s) => s.points);
   if (allPoints.length < 2) {
@@ -1063,7 +1082,7 @@ function BasisChart({ prices }) {
       <div className="card">
         <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Basis Over Time</h3>
         <p className="mono" style={{ fontSize: 12, color: "var(--muted2)", marginTop: 8 }}>
-          Log basis (or both cash and futures) on at least two different dates to see a trend line here.
+          Log basis (or both cash and futures) for the nearest tracked month on at least two different dates to see a trend line here.
         </p>
       </div>
     );
@@ -1142,7 +1161,7 @@ function BasisChart({ prices }) {
         {series.map((s) => (
           <div key={s.wt} style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ width: 10, height: 10, background: s.color, borderRadius: 2, display: "inline-block" }}></span>
-            <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{s.wt}</span>
+            <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{s.wt}{s.nearest ? ` (${s.nearest})` : " (general/nearby)"}</span>
           </div>
         ))}
       </div>
