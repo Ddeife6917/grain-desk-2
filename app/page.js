@@ -17,12 +17,35 @@ const fmtC = (n) => {
 };
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
+// Finds the most recent price row for a wheat type + specific delivery
+// month. Used so contracts price off the month that actually matches
+// their delivery period, instead of just whatever was logged last.
+function getMonthPrice(prices, wheatType, monthLabel) {
+  if (!monthLabel) return null;
+  const rows = prices
+    .filter((r) => r.wheat_type === wheatType && r.delivery_month === monthLabel)
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
+  if (rows.length === 0) return null;
+  const cashRow = rows.find((r) => r.cash_price !== null && r.cash_price !== undefined);
+  const futRow = rows.find((r) => r.futures_price !== null && r.futures_price !== undefined);
+  const basisRow = rows.find((r) => r.basis !== null && r.basis !== undefined);
+  return {
+    cashPrice: cashRow ? Number(cashRow.cash_price) : null,
+    futuresPrice: futRow ? Number(futRow.futures_price) : null,
+    futuresMarket: futRow ? futRow.futures_market : null,
+    basis: basisRow ? Number(basisRow.basis) : null,
+    date: rows[0].date,
+  };
+}
+
 export default function Dashboard() {
   const router = useRouter();
   const [session, setSession] = useState(undefined); // undefined = checking, null = signed out
   const [prices, setPrices] = useState([]);
   const [contracts, setContracts] = useState([]);
   const [breakevens, setBreakevens] = useState({});
+  const [trackedMonths, setTrackedMonths] = useState({}); // { wheatType: ["Aug 2026", ...] }
+  const [newMonthInput, setNewMonthInput] = useState({ "Soft White Winter": "", "Hard Red Winter": "" });
   const [tab, setTab] = useState("board");
   const [deliveringId, setDeliveringId] = useState(null);
   const [deliveryForm, setDeliveryForm] = useState({ date: todayISO(), finalPrice: "", finalFutures: "", finalBasis: "" });
@@ -41,6 +64,7 @@ export default function Dashboard() {
   const [priceForm, setPriceForm] = useState({
     date: todayISO(),
     wheatType: WHEAT_TYPES[0],
+    deliveryMonth: "",
     futuresMarket: FUTURES_MARKETS[0],
     futuresPrice: "",
     cashPrice: "",
@@ -76,16 +100,21 @@ export default function Dashboard() {
 
   // ---- data loading ----
   const loadAll = useCallback(async () => {
-    const [{ data: priceRows }, { data: contractRows }, { data: beRows }] = await Promise.all([
+    const [{ data: priceRows }, { data: contractRows }, { data: beRows }, { data: monthRows }] = await Promise.all([
       supabase.from("prices").select("*").order("date", { ascending: false }),
       supabase.from("contracts").select("*").order("date_entered", { ascending: false }),
       supabase.from("breakevens").select("*"),
+      supabase.from("tracked_months").select("*").order("sort_order", { ascending: true }),
     ]);
     setPrices(priceRows || []);
     setContracts(contractRows || []);
     const beMap = {};
     (beRows || []).forEach((r) => { beMap[r.wheat_type] = { value: r.value, expectedBushels: r.expected_bushels }; });
     setBreakevens(beMap);
+    const monthMap = {};
+    WHEAT_TYPES.forEach((wt) => { monthMap[wt] = []; });
+    (monthRows || []).forEach((r) => { (monthMap[r.wheat_type] ||= []).push(r.month_label); });
+    setTrackedMonths(monthMap);
   }, []);
 
   useEffect(() => {
@@ -135,11 +164,18 @@ export default function Dashboard() {
 
   const contractStats = useMemo(() => {
     return contracts.map((c) => {
+      const monthPrice = getMonthPrice(prices, c.wheat_type, c.delivery_period);
+      const usingMonthPrice = monthPrice !== null && (monthPrice.cashPrice !== null || monthPrice.futuresPrice !== null || monthPrice.basis !== null);
+
       const latest = latestByType[c.wheat_type];
-      const currentCash = latest && latest.cash_price !== null ? Number(latest.cash_price) : null;
-      const currentBasis = basisByType[c.wheat_type]?.value ?? null;
+      const generalCash = latest && latest.cash_price !== null ? Number(latest.cash_price) : null;
+      const generalBasis = basisByType[c.wheat_type]?.value ?? null;
       const futMarket = FUTURES_FOR_TYPE[c.wheat_type];
-      const currentFutures = latestFuturesByMarket[futMarket]?.futures_price ?? null;
+      const generalFutures = latestFuturesByMarket[futMarket]?.futures_price ?? null;
+
+      const currentCash = usingMonthPrice && monthPrice.cashPrice !== null ? monthPrice.cashPrice : generalCash;
+      const currentBasis = usingMonthPrice && monthPrice.basis !== null ? monthPrice.basis : generalBasis;
+      const currentFutures = usingMonthPrice && monthPrice.futuresPrice !== null ? monthPrice.futuresPrice : generalFutures;
 
       // Fully locked (both legs known) only for Cash Forward contracts.
       const isPriced = c.contract_type === "Cash Forward" && c.price !== null && c.price !== "";
@@ -165,9 +201,9 @@ export default function Dashboard() {
         const refPrice = c.delivered ? Number(c.final_price) : isPriced ? Number(c.price) : whatIfPrice !== null ? whatIfPrice : currentCash;
         if (refPrice !== null && refPrice !== undefined && !isNaN(refPrice)) beDelta = (refPrice - Number(be)) * bu;
       }
-      return { ...c, currentCash, currentBasis, currentFutures, isPriced, whatIfPrice, mtmValue, mtmDelta, whatIfDelta, beDelta };
+      return { ...c, currentCash, currentBasis, currentFutures, isPriced, whatIfPrice, mtmValue, mtmDelta, whatIfDelta, beDelta, usingMonthPrice };
     });
-  }, [contracts, latestByType, basisByType, latestFuturesByMarket, breakevens]);
+  }, [contracts, prices, latestByType, basisByType, latestFuturesByMarket, breakevens]);
 
   const activeContracts = useMemo(() => contractStats.filter((c) => !c.delivered), [contractStats]);
   const deliveredContracts = useMemo(() => contractStats.filter((c) => c.delivered), [contractStats]);
@@ -234,6 +270,7 @@ export default function Dashboard() {
     const { error } = await supabase.from("prices").insert([{
       date: priceForm.date,
       wheat_type: priceForm.wheatType,
+      delivery_month: priceForm.deliveryMonth || null,
       futures_market: priceForm.futuresMarket,
       futures_price: has(futuresPrice) ? Number(futuresPrice) : null,
       cash_price: has(cashPrice) ? Number(cashPrice) : null,
@@ -407,6 +444,24 @@ export default function Dashboard() {
     loadAll();
   }
 
+  async function addTrackedMonth(wheatType) {
+    const label = (newMonthInput[wheatType] || "").trim();
+    if (!label) return;
+    const existing = trackedMonths[wheatType] || [];
+    if (existing.length >= 3) { alert("You can track up to 3 delivery months per wheat type. Remove one first."); return; }
+    if (existing.includes(label)) { setNewMonthInput((f) => ({ ...f, [wheatType]: "" })); return; }
+    const { error } = await supabase.from("tracked_months").insert([{ wheat_type: wheatType, month_label: label, sort_order: existing.length }]);
+    if (error) { alert("Couldn't add month: " + error.message); return; }
+    setNewMonthInput((f) => ({ ...f, [wheatType]: "" }));
+    loadAll();
+  }
+
+  async function removeTrackedMonth(wheatType, label) {
+    const { error } = await supabase.from("tracked_months").delete().eq("wheat_type", wheatType).eq("month_label", label);
+    if (error) { alert("Couldn't remove month: " + error.message); return; }
+    loadAll();
+  }
+
   async function saveBreakeven(wheatType, value) {
     setBreakevens((b) => ({ ...b, [wheatType]: { ...b[wheatType], value } }));
     await supabase.from("breakevens").upsert(
@@ -540,11 +595,54 @@ export default function Dashboard() {
 
             <BasisChart prices={prices} />
 
+            <div className="card">
+              <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Tracked Delivery Months</h3>
+              <p className="mono" style={{ fontSize: 10, color: "var(--muted2)", marginTop: 4, marginBottom: 12 }}>
+                Up to 3 months per wheat type. Contracts and the delivery-month price table below use whichever month matches a contract's delivery period.
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                {WHEAT_TYPES.map((wt) => (
+                  <div key={wt}>
+                    <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>{wt}</div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                      {(trackedMonths[wt] || []).map((m) => (
+                        <span key={m} className="mono" style={{ fontSize: 12, background: "#FFFFFF", border: "1px solid var(--border)", borderRadius: 6, padding: "4px 8px", display: "flex", alignItems: "center", gap: 6 }}>
+                          {m}
+                          <button onClick={() => removeTrackedMonth(wt, m)} className="btn-link" style={{ fontSize: 12 }}>✕</button>
+                        </span>
+                      ))}
+                      {(trackedMonths[wt] || []).length === 0 && <span className="mono" style={{ fontSize: 12, color: "var(--muted2)" }}>No months tracked yet.</span>}
+                    </div>
+                    {(trackedMonths[wt] || []).length < 3 && (
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <input
+                          type="text"
+                          placeholder="e.g. Aug 2026"
+                          value={newMonthInput[wt] || ""}
+                          onChange={(e) => setNewMonthInput((f) => ({ ...f, [wt]: e.target.value }))}
+                          style={{ maxWidth: 160 }}
+                        />
+                        <button onClick={() => addTrackedMonth(wt)} className="btn btn-primary" style={{ padding: "6px 14px" }}>Add</button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <DeliveryMonthPrices prices={prices} trackedMonths={trackedMonths} />
+
             <form onSubmit={addPrice} className="card form-grid">
               <Field label="Date"><input type="date" value={priceForm.date} onChange={(e) => setPriceForm((f) => ({ ...f, date: e.target.value }))} /></Field>
               <Field label="Wheat type">
                 <select value={priceForm.wheatType} onChange={(e) => setPriceForm((f) => ({ ...f, wheatType: e.target.value }))}>
                   {WHEAT_TYPES.map((w) => <option key={w}>{w}</option>)}
+                </select>
+              </Field>
+              <Field label="Delivery month">
+                <select value={priceForm.deliveryMonth} onChange={(e) => setPriceForm((f) => ({ ...f, deliveryMonth: e.target.value }))}>
+                  <option value="">General / nearby</option>
+                  {(trackedMonths[priceForm.wheatType] || []).map((m) => <option key={m}>{m}</option>)}
                 </select>
               </Field>
               <Field label="Futures market">
@@ -617,7 +715,12 @@ export default function Dashboard() {
                   <input type="number" step="0.01" placeholder="-0.45" value={contractForm.lockedBasis} onChange={(e) => setContractForm((f) => ({ ...f, lockedBasis: e.target.value }))} />
                 </Field>
               )}
-              <Field label="Delivery period"><input type="text" placeholder="Aug 2026" value={contractForm.deliveryPeriod} onChange={(e) => setContractForm((f) => ({ ...f, deliveryPeriod: e.target.value }))} /></Field>
+              <Field label="Delivery period">
+                <input type="text" list="delivery-months-add" placeholder="Aug 2026" value={contractForm.deliveryPeriod} onChange={(e) => setContractForm((f) => ({ ...f, deliveryPeriod: e.target.value }))} />
+                <datalist id="delivery-months-add">
+                  {(trackedMonths[contractForm.wheatType] || []).map((m) => <option key={m} value={m} />)}
+                </datalist>
+              </Field>
               <Field label="Elevator"><input type="text" placeholder="Lauer" value={contractForm.elevator} onChange={(e) => setContractForm((f) => ({ ...f, elevator: e.target.value }))} /></Field>
               <Field label="Date entered"><input type="date" value={contractForm.dateEntered} onChange={(e) => setContractForm((f) => ({ ...f, dateEntered: e.target.value }))} /></Field>
               <Field label="Notes"><input type="text" placeholder="optional" value={contractForm.notes} onChange={(e) => setContractForm((f) => ({ ...f, notes: e.target.value }))} /></Field>
@@ -651,7 +754,14 @@ export default function Dashboard() {
                             </span>
                           ) : "—"}
                         </td>
-                        <td className="mono">{fmtC(c.currentCash)}</td>
+                        <td className="mono">
+                          {fmtC(c.currentCash)}
+                          {c.currentCash !== null && (
+                            <span className="mono" style={{ fontSize: 9, color: c.usingMonthPrice ? "var(--gain)" : "var(--muted2)", display: "block" }}>
+                              {c.usingMonthPrice ? `${c.delivery_period} price` : "general/nearby"}
+                            </span>
+                          )}
+                        </td>
                         <td className="mono">{c.delivery_period || "—"}</td>
                         <td className="mono">{c.elevator || "—"}</td>
                         <td className="mono" title={c.notes || ""} style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.notes || "—"}</td>
@@ -701,7 +811,10 @@ export default function Dashboard() {
                                   </Field>
                                 )}
                                 <Field label="Delivery period">
-                                  <input type="text" value={editForm.deliveryPeriod} onChange={(e) => setEditForm((f) => ({ ...f, deliveryPeriod: e.target.value }))} />
+                                  <input type="text" list="delivery-months-edit" value={editForm.deliveryPeriod} onChange={(e) => setEditForm((f) => ({ ...f, deliveryPeriod: e.target.value }))} />
+                                  <datalist id="delivery-months-edit">
+                                    {(trackedMonths[editForm.wheatType] || []).map((m) => <option key={m} value={m} />)}
+                                  </datalist>
                                 </Field>
                                 <Field label="Elevator">
                                   <input type="text" value={editForm.elevator} onChange={(e) => setEditForm((f) => ({ ...f, elevator: e.target.value }))} />
@@ -758,7 +871,10 @@ export default function Dashboard() {
                                   <input type="text" value={splitForm.elevator} onChange={(e) => setSplitForm((f) => ({ ...f, elevator: e.target.value }))} />
                                 </Field>
                                 <Field label="Delivery period">
-                                  <input type="text" value={splitForm.deliveryPeriod} onChange={(e) => setSplitForm((f) => ({ ...f, deliveryPeriod: e.target.value }))} />
+                                  <input type="text" list="delivery-months-split" value={splitForm.deliveryPeriod} onChange={(e) => setSplitForm((f) => ({ ...f, deliveryPeriod: e.target.value }))} />
+                                  <datalist id="delivery-months-split">
+                                    {(trackedMonths[c.wheat_type] || []).map((m) => <option key={m} value={m} />)}
+                                  </datalist>
                                 </Field>
                                 <Field label="Date entered">
                                   <input type="date" value={splitForm.dateEntered} onChange={(e) => setSplitForm((f) => ({ ...f, dateEntered: e.target.value }))} />
@@ -877,6 +993,49 @@ function Stat({ label, value, tone, wide }) {
     </div>
   );
 }
+function DeliveryMonthPrices({ prices, trackedMonths }) {
+  const colors = { "Soft White Winter": "#F2994A", "Hard Red Winter": "#1D5D9B" };
+  const rows = [];
+  WHEAT_TYPES.forEach((wt) => {
+    (trackedMonths[wt] || []).forEach((month) => {
+      const p = getMonthPrice(prices, wt, month);
+      rows.push({ wt, month, p });
+    });
+  });
+
+  if (rows.length === 0) {
+    return (
+      <div className="card">
+        <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Delivery Month Prices</h3>
+        <p className="mono" style={{ fontSize: 12, color: "var(--muted2)", marginTop: 8 }}>Add tracked delivery months above, then log prices against them to see them here.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card">
+      <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Delivery Month Prices</h3>
+      <div className="table-wrap" style={{ marginTop: 12, border: "none" }}>
+        <table>
+          <thead><tr><th>Wheat</th><th>Month</th><th>Futures $</th><th>Cash $</th><th>Basis</th><th>As of</th></tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.wt + r.month}>
+                <td className="mono"><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 4, background: colors[r.wt], marginRight: 6 }}></span>{r.wt}</td>
+                <td className="mono">{r.month}</td>
+                <td className="mono">{r.p ? fmtC(r.p.futuresPrice) : "—"}</td>
+                <td className="mono">{r.p ? fmtC(r.p.cashPrice) : "—"}</td>
+                <td className="mono">{r.p && r.p.basis !== null ? fmtC(r.p.basis) : "—"}</td>
+                <td className="mono" style={{ fontSize: 11, color: "var(--muted2)" }}>{r.p ? r.p.date : "no data yet"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function Field({ label, children }) {
   return (
     <label style={{ display: "block" }}>
