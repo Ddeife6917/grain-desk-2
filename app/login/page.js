@@ -39,7 +39,10 @@ export default function LoginPage() {
   return (
     <div className="login-page">
       <div className="login-card">
-        <h1 className="disp login-title">Grain Desk</h1>
+        <div style={{ display: "flex", justifyContent: "center", marginBottom: 16 }}>
+          <img src="/logo.png" alt="" width={72} height={72} style={{ borderRadius: 16 }} />
+        </div>
+        <h1 className="disp login-title" style={{ textAlign: "center" }}>Grain Desk</h1>
         <p className="login-sub mono">{mode === "signin" ? "Sign in to your account" : "Create an account"}</p>
         <form onSubmit={handleSubmit}>
           <div className="login-field">
@@ -55,7 +58,7 @@ export default function LoginPage() {
           </button>
         </form>
         {error && <p className="login-error mono">{error}</p>}
-        {info && <p className="login-error mono" style={{ color: "#1D5D9B" }}>{info}</p>}
+        {info && <p className="login-error mono" style={{ color: "#1F5C34" }}>{info}</p>}
         <button className="login-toggle" onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setError(""); setInfo(""); }}>
           {mode === "signin" ? "Need an account? Sign up" : "Already have an account? Sign in"}
         </button>
