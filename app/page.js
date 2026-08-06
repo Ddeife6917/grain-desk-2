@@ -583,9 +583,9 @@ export default function Dashboard() {
 
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Wheat</th><th>Type</th><th>Bu</th><th>Locked</th><th>What if priced now</th><th>Current cash $</th><th>Delivery</th><th>Elevator</th><th>vs. market</th><th></th></tr></thead>
+                <thead><tr><th>Wheat</th><th>Type</th><th>Bu</th><th>Locked</th><th>What if priced now</th><th>Current cash $</th><th>Delivery</th><th>Elevator</th><th>Notes</th><th>vs. market</th><th></th></tr></thead>
                 <tbody>
-                  {activeContracts.length === 0 && <tr><td colSpan={10} className="empty-row">No active contracts.</td></tr>}
+                  {activeContracts.length === 0 && <tr><td colSpan={11} className="empty-row">No active contracts.</td></tr>}
                   {activeContracts.map((c) => (
                     <React.Fragment key={c.id}>
                       <tr>
@@ -611,6 +611,7 @@ export default function Dashboard() {
                         <td className="mono">{fmtC(c.currentCash)}</td>
                         <td className="mono">{c.delivery_period || "—"}</td>
                         <td className="mono">{c.elevator || "—"}</td>
+                        <td className="mono" title={c.notes || ""} style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.notes || "—"}</td>
                         <td className="mono">
                           {c.isPriced && c.mtmDelta !== null ? <span className={c.mtmDelta > 0 ? "gain" : c.mtmDelta < 0 ? "loss" : ""}>{fmt$(c.mtmDelta)}</span> : "—"}
                         </td>
@@ -624,7 +625,7 @@ export default function Dashboard() {
                       </tr>
                       {splittingId === c.id && (
                         <tr>
-                          <td colSpan={10}>
+                          <td colSpan={11}>
                             <div className="card" style={{ background: "#FFFFFF" }}>
                               <p className="mono note" style={{ marginTop: 0 }}>
                                 Pulls bushels out of this Unpriced/Stored contract ({Number(c.bushels).toLocaleString()} bu available) and creates a new priced contract with them. The elevator and delivery period below are pre-filled from this contract — edit if the new contract is going somewhere different.
@@ -675,7 +676,7 @@ export default function Dashboard() {
                       )}
                       {deliveringId === c.id && (
                         <tr>
-                          <td colSpan={10}>
+                          <td colSpan={11}>
                             <div className="card" style={{ background: "#FFFFFF" }}>
                               <div className="form-grid">
                                 <Field label="Delivery date">
