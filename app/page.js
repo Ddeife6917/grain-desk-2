@@ -758,7 +758,11 @@ export default function Dashboard() {
                         <td className="mono">{r.futures_market}</td>
                         <td className="mono">{fmtC(r.futures_price)}</td>
                         <td className="mono">{fmtC(r.cash_price)}</td>
-                        <td className="mono">{fmtC(r.basis)}</td>
+                        <td className="mono">
+                          {r.basis !== null && r.basis !== undefined ? (
+                            <span className={Number(r.basis) < 0 ? "loss" : Number(r.basis) > 0 ? "gain" : ""}>{fmtC(r.basis)}</span>
+                          ) : "—"}
+                        </td>
                         <td className="mono">{r.elevator || "—"}</td>
                         <td className="mono" style={{ fontSize: 11, color: "var(--muted2)" }}>
                           {r.created_by_email ? r.created_by_email.split("@")[0] : "—"}
@@ -1163,7 +1167,11 @@ function DeliveryMonthPrices({ prices, trackedMonths }) {
                 <td className="mono">{r.month}</td>
                 <td className="mono">{r.p ? fmtC(r.p.futuresPrice) : "—"}</td>
                 <td className="mono">{r.p ? fmtC(r.p.cashPrice) : "—"}</td>
-                <td className="mono">{r.p && r.p.basis !== null ? fmtC(r.p.basis) : "—"}</td>
+                <td className="mono">
+                  {r.p && r.p.basis !== null ? (
+                    <span className={Number(r.p.basis) < 0 ? "loss" : Number(r.p.basis) > 0 ? "gain" : ""}>{fmtC(r.p.basis)}</span>
+                  ) : "—"}
+                </td>
                 <td className="mono" style={{ fontSize: 11, color: "var(--muted2)" }}>{r.p ? r.p.date : "no data yet"}</td>
               </tr>
             ))}
