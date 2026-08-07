@@ -173,7 +173,7 @@ export default function Dashboard() {
     const beMap = {};
     (beRows || []).forEach((r) => {
       const yr = r.crop_year || "unassigned";
-      (beMap[yr] ||= {})[r.wheat_type] = { value: r.value, expectedBushels: r.expected_bushels };
+      (beMap[yr] ||= {})[r.wheat_type] = { value: r.value, expectedBushels: r.expected_bushels, seededAcres: r.seeded_acres, projectedYield: r.projected_yield, fieldNotes: r.field_notes };
     });
     setBreakevens(beMap);
     const monthMap = {};
@@ -304,16 +304,25 @@ export default function Dashboard() {
           partiallyHedgedBu += b;
         }
       });
-      const expected = breakevens[selectedYear]?.[wt]?.expectedBushels;
-      const hasExpected = expected !== undefined && expected !== null && expected !== "" && Number(expected) > 0;
+      const be = breakevens[selectedYear]?.[wt] || {};
+      const acres = be.seededAcres;
+      const yieldGoal = be.projectedYield;
+      const hasAcresYield = acres !== undefined && acres !== null && acres !== "" && Number(acres) > 0
+        && yieldGoal !== undefined && yieldGoal !== null && yieldGoal !== "" && Number(yieldGoal) > 0;
+      const calculatedExpected = hasAcresYield ? Number(acres) * Number(yieldGoal) : null;
+      const manualExpected = be.expectedBushels;
+      const hasManualExpected = manualExpected !== undefined && manualExpected !== null && manualExpected !== "" && Number(manualExpected) > 0;
+      const expected = hasAcresYield ? calculatedExpected : hasManualExpected ? Number(manualExpected) : null;
+      const hasExpected = expected !== null;
       out[wt] = {
         totalBu,
         fullyPricedBu,
         partiallyHedgedBu,
         blendedPrice: fullyPricedBu > 0 ? fullyPricedValue / fullyPricedBu : null,
-        pctPriced: hasExpected ? (fullyPricedBu / Number(expected)) * 100 : null,
-        pctHedged: hasExpected ? (partiallyHedgedBu / Number(expected)) * 100 : null,
-        expectedBushels: hasExpected ? Number(expected) : null,
+        pctPriced: hasExpected ? (fullyPricedBu / expected) * 100 : null,
+        pctHedged: hasExpected ? (partiallyHedgedBu / expected) * 100 : null,
+        expectedBushels: hasExpected ? expected : null,
+        expectedFromAcresYield: hasAcresYield,
       };
     });
     return out;
@@ -591,6 +600,33 @@ export default function Dashboard() {
     setBreakevens((b) => ({ ...b, [selectedYear]: { ...b[selectedYear], [wheatType]: { ...b[selectedYear]?.[wheatType], expectedBushels } } }));
     await supabase.from("breakevens").upsert(
       { user_id: session.user.id, wheat_type: wheatType, crop_year: selectedYear, expected_bushels: expectedBushels === "" ? null : Number(expectedBushels) },
+      { onConflict: "user_id,wheat_type,crop_year" }
+    );
+  }
+
+  async function saveSeededAcres(wheatType, seededAcres) {
+    if (!selectedYear) { alert("Add a crop year first."); return; }
+    setBreakevens((b) => ({ ...b, [selectedYear]: { ...b[selectedYear], [wheatType]: { ...b[selectedYear]?.[wheatType], seededAcres } } }));
+    await supabase.from("breakevens").upsert(
+      { user_id: session.user.id, wheat_type: wheatType, crop_year: selectedYear, seeded_acres: seededAcres === "" ? null : Number(seededAcres) },
+      { onConflict: "user_id,wheat_type,crop_year" }
+    );
+  }
+
+  async function saveProjectedYield(wheatType, projectedYield) {
+    if (!selectedYear) { alert("Add a crop year first."); return; }
+    setBreakevens((b) => ({ ...b, [selectedYear]: { ...b[selectedYear], [wheatType]: { ...b[selectedYear]?.[wheatType], projectedYield } } }));
+    await supabase.from("breakevens").upsert(
+      { user_id: session.user.id, wheat_type: wheatType, crop_year: selectedYear, projected_yield: projectedYield === "" ? null : Number(projectedYield) },
+      { onConflict: "user_id,wheat_type,crop_year" }
+    );
+  }
+
+  async function saveFieldNotes(wheatType, fieldNotes) {
+    if (!selectedYear) { alert("Add a crop year first."); return; }
+    setBreakevens((b) => ({ ...b, [selectedYear]: { ...b[selectedYear], [wheatType]: { ...b[selectedYear]?.[wheatType], fieldNotes } } }));
+    await supabase.from("breakevens").upsert(
+      { user_id: session.user.id, wheat_type: wheatType, crop_year: selectedYear, field_notes: fieldNotes === "" ? null : fieldNotes },
       { onConflict: "user_id,wheat_type,crop_year" }
     );
   }
@@ -1178,18 +1214,51 @@ export default function Dashboard() {
         {tab === "settings" && (
           <section style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 24 }}>
             <p style={{ fontSize: 14, color: "var(--muted)", maxWidth: 560 }}>
-              Optional, per wheat type, private to your account. Your breakeven (cost of production) drives the "vs. breakeven" columns. Expected bushels drives the "% of crop priced" and blended price figures in Position Summary.
+              Optional, per wheat type, private to your account, specific to the selected crop year. Breakeven (cost of production) drives the "vs. breakeven" columns. Seeded acres × projected yield automatically calculates your expected bushels, which drives "% of crop priced" in Position Summary — or enter expected bushels directly if you'd rather skip the acres/yield math.
             </p>
-            {WHEAT_TYPES.map((wt) => (
-              <div key={wt} className="stat-grid" style={{ maxWidth: 560 }}>
-                <Field label={`${wt} breakeven $/bu`}>
-                  <input type="number" step="0.01" placeholder="e.g. 5.10" value={breakevens[selectedYear]?.[wt]?.value ?? ""} onChange={(e) => saveBreakeven(wt, e.target.value)} />
-                </Field>
-                <Field label={`${wt} expected bushels this year`}>
-                  <input type="number" placeholder="e.g. 40000" value={breakevens[selectedYear]?.[wt]?.expectedBushels ?? ""} onChange={(e) => saveExpectedBushels(wt, e.target.value)} />
-                </Field>
-              </div>
-            ))}
+            {WHEAT_TYPES.map((wt) => {
+              const be = breakevens[selectedYear]?.[wt] || {};
+              const acres = be.seededAcres;
+              const yieldGoal = be.projectedYield;
+              const hasBoth = acres !== undefined && acres !== null && acres !== "" && Number(acres) > 0 && yieldGoal !== undefined && yieldGoal !== null && yieldGoal !== "" && Number(yieldGoal) > 0;
+              const calculated = hasBoth ? Number(acres) * Number(yieldGoal) : null;
+              return (
+                <div key={wt} className="card" style={{ maxWidth: 560 }}>
+                  <div className="disp" style={{ fontSize: 13, textTransform: "uppercase", color: "var(--blue)", marginBottom: 8 }}>{wt}</div>
+                  <div className="stat-grid">
+                    <Field label="Breakeven $/bu">
+                      <input type="number" step="0.01" placeholder="e.g. 5.10" value={breakevens[selectedYear]?.[wt]?.value ?? ""} onChange={(e) => saveBreakeven(wt, e.target.value)} />
+                    </Field>
+                    <Field label="Seeded acres">
+                      <input type="number" placeholder="e.g. 800" value={acres ?? ""} onChange={(e) => saveSeededAcres(wt, e.target.value)} />
+                    </Field>
+                    <Field label="Projected yield (bu/acre)">
+                      <input type="number" step="0.1" placeholder="e.g. 65" value={yieldGoal ?? ""} onChange={(e) => saveProjectedYield(wt, e.target.value)} />
+                    </Field>
+                    {!hasBoth && (
+                      <Field label="Expected bushels (manual, until acres + yield are both set)">
+                        <input type="number" placeholder="e.g. 40000" value={breakevens[selectedYear]?.[wt]?.expectedBushels ?? ""} onChange={(e) => saveExpectedBushels(wt, e.target.value)} />
+                      </Field>
+                    )}
+                  </div>
+                  {hasBoth && (
+                    <p className="mono note" style={{ marginTop: 8 }}>
+                      Expected bushels: {Number(acres).toLocaleString()} acres × {Number(yieldGoal)} bu/acre = <strong>{calculated.toLocaleString()} bu</strong>
+                    </p>
+                  )}
+                  <div style={{ marginTop: 12 }}>
+                    <Field label="Which fields (optional)">
+                      <input
+                        type="text"
+                        placeholder="e.g. 320 ac Kramer 4, 480 ac Kramer 2"
+                        value={be.fieldNotes ?? ""}
+                        onChange={(e) => saveFieldNotes(wt, e.target.value)}
+                      />
+                    </Field>
+                  </div>
+                </div>
+              );
+            })}
           </section>
         )}
         </>
