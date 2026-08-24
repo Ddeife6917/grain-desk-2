@@ -204,12 +204,21 @@ export default function Dashboard() {
     return out;
   }, [prices, nearestMonthByType]);
 
+  // Used specifically for the shared ticker board up top — always the most
+  // recently logged "General / nearby" entry, ignoring tracked-month prices,
+  // so the top bar reflects the plain current price everyone's used to.
+  const generalPriceByType = useMemo(() => {
+    const out = {};
+    WHEAT_TYPES.forEach((wt) => { out[wt] = getGeneralPrice(prices, wt); });
+    return out;
+  }, [prices]);
+
   const sortedPrices = useMemo(() => [...prices].sort((a, b) => (a.date < b.date ? 1 : -1)), [prices]);
 
   const basisByType = useMemo(() => {
     const out = {};
     WHEAT_TYPES.forEach((wt) => {
-      const best = bestPriceByType[wt];
+      const best = generalPriceByType[wt];
       const cash = best?.cashPrice ?? null;
       const fut = best?.futuresPrice ?? null;
       const value = best?.basis !== null && best?.basis !== undefined ? best.basis : (cash !== null && fut !== null ? cash - fut : null);
@@ -221,7 +230,7 @@ export default function Dashboard() {
       };
     });
     return out;
-  }, [bestPriceByType]);
+  }, [generalPriceByType]);
 
   const contractStats = useMemo(() => {
     return contracts.map((c) => {
@@ -738,10 +747,10 @@ export default function Dashboard() {
         <div className="ticker">
           <div className="wrap ticker-grid">
             {[
-              { label: "CBOT Wheat (SRW)", val: bestPriceByType["Soft White Winter"]?.futuresPrice },
-              { label: "KC HRW Wheat", val: bestPriceByType["Hard Red Winter"]?.futuresPrice },
-              { label: "Cash · Soft White", val: bestPriceByType["Soft White Winter"]?.cashPrice },
-              { label: "Cash · Hard Red", val: bestPriceByType["Hard Red Winter"]?.cashPrice },
+              { label: "CBOT Wheat (SRW)", val: generalPriceByType["Soft White Winter"]?.futuresPrice },
+              { label: "KC HRW Wheat", val: generalPriceByType["Hard Red Winter"]?.futuresPrice },
+              { label: "Cash · Soft White", val: generalPriceByType["Soft White Winter"]?.cashPrice },
+              { label: "Cash · Hard Red", val: generalPriceByType["Hard Red Winter"]?.cashPrice },
             ].map((t, i) => (
               <div key={i}>
                 <div className="mono tile-label">{t.label}</div>
@@ -758,7 +767,7 @@ export default function Dashboard() {
                 </div>
                 <div className="mono tile-sub">
                   {basisByType[wt].value !== null
-                    ? `${bestPriceByType[wt]?.month || "general/nearby"} · as of ${basisByType[wt].cashDate}`
+                    ? `general/nearby · as of ${basisByType[wt].cashDate}`
                     : "needs cash & futures"}
                 </div>
               </div>
