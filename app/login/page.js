@@ -271,16 +271,25 @@ export default function Dashboard() {
 
   const totals = useMemo(() => {
     let bu = 0, priceValueLocked = 0, marketValue = 0, mtm = 0, be = 0, haveMtm = false, haveBe = false;
-    activeContracts.forEach((c) => {
+    yearContractStats.forEach((c) => {
       const b = Number(c.bushels) || 0;
       bu += b;
-      if (c.isPriced) priceValueLocked += b * Number(c.price);
-      if (c.mtmValue !== null) { marketValue += c.mtmValue; haveMtm = true; }
-      if (c.mtmDelta !== null) mtm += c.mtmDelta;
+      if (c.delivered) {
+        priceValueLocked += b * Number(c.final_price);
+        if (c.mtmValue !== null) {
+          marketValue += c.mtmValue;
+          haveMtm = true;
+          mtm += b * Number(c.final_price) - c.mtmValue;
+        }
+      } else {
+        if (c.isPriced) priceValueLocked += b * Number(c.price);
+        if (c.mtmValue !== null) { marketValue += c.mtmValue; haveMtm = true; }
+        if (c.mtmDelta !== null) mtm += c.mtmDelta;
+      }
       if (c.beDelta !== null) { be += c.beDelta; haveBe = true; }
     });
     return { bu, priceValueLocked, marketValue, mtm, be, haveMtm, haveBe };
-  }, [activeContracts]);
+  }, [yearContractStats]);
 
   // "Fully priced" = Cash Forward (priced) + any delivered contract, since the
   // final price is actually known. HTA/Basis contracts count as "partially
@@ -737,7 +746,7 @@ export default function Dashboard() {
             </div>
           )}
           <p className="mono note">
-            "Locked vs. today's market" compares what you locked in on priced contracts to what those bushels would be worth at today's most recent cash price. Positive means your locked price beats today's market; negative means the market has moved above what you locked in. These totals reflect open contracts only — delivered/settled contracts are tracked separately in the Contract Ledger tab.
+            "Locked vs. today's market" compares what you locked in — on priced contracts and delivered ones alike — to what those bushels would be worth at today's most recent cash price. Positive means your locked/final price beats today's market; negative means the market has moved above what you got. These totals include every contract for the selected crop year, active and delivered.
           </p>
 
           <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 16 }}>
