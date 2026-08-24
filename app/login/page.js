@@ -294,6 +294,27 @@ export default function Dashboard() {
   // "Fully priced" = Cash Forward (priced) + any delivered contract, since the
   // final price is actually known. HTA/Basis contracts count as "partially
   // hedged" until delivered, since one leg is still open.
+  const seasonStats = useMemo(() => {
+    const out = {};
+    WHEAT_TYPES.forEach((wt) => {
+      const rows = yearContractStats.filter((c) => c.wheat_type === wt);
+      let totalBu = 0, deliveredBu = 0, deliveredValue = 0, openBu = 0, beDeltaTotal = 0, haveBe = false;
+      rows.forEach((c) => {
+        const b = Number(c.bushels) || 0;
+        totalBu += b;
+        if (c.delivered) { deliveredBu += b; deliveredValue += b * Number(c.final_price); }
+        else { openBu += b; }
+        if (c.beDelta !== null) { beDeltaTotal += c.beDelta; haveBe = true; }
+      });
+      out[wt] = {
+        totalBu, deliveredBu, openBu,
+        blendedDeliveredPrice: deliveredBu > 0 ? deliveredValue / deliveredBu : null,
+        beDeltaTotal: haveBe ? beDeltaTotal : null,
+      };
+    });
+    return out;
+  }, [yearContractStats]);
+
   const perTypeStats = useMemo(() => {
     const out = {};
     WHEAT_TYPES.forEach((wt) => {
@@ -639,6 +660,58 @@ export default function Dashboard() {
     );
   }
 
+  async function exportToExcel() {
+    if (!selectedYear) { alert("Select a crop year first."); return; }
+    const XLSX = await import("xlsx");
+
+    const summaryRows = WHEAT_TYPES.map((wt) => {
+      const s = seasonStats[wt];
+      const p = perTypeStats[wt];
+      const be = breakevens[selectedYear]?.[wt] || {};
+      return {
+        "Wheat Type": wt,
+        "Total Bushels": s.totalBu,
+        "Delivered Bushels": s.deliveredBu,
+        "Still Active Bushels": s.openBu,
+        "Blended Delivered Price ($/bu)": s.blendedDeliveredPrice !== null ? Number(s.blendedDeliveredPrice.toFixed(4)) : "",
+        "Fully Priced Bushels (incl. delivered)": p.fullyPricedBu,
+        "% of Crop Priced": p.pctPriced !== null ? Number(p.pctPriced.toFixed(1)) : "",
+        "Blended Avg Price, Fully Priced ($/bu)": p.blendedPrice !== null ? Number(p.blendedPrice.toFixed(4)) : "",
+        "Breakeven ($/bu)": be.value ?? "",
+        "$ vs Breakeven (all contracts)": s.beDeltaTotal !== null ? Number(s.beDeltaTotal.toFixed(2)) : "",
+        "Seeded Acres": be.seededAcres ?? "",
+        "Projected Yield (bu/acre)": be.projectedYield ?? "",
+        "Expected Bushels": p.expectedBushels ?? "",
+        "Which Fields": be.fieldNotes ?? "",
+      };
+    });
+
+    const contractRows = yearContractStats.map((c) => {
+      let price = "";
+      if (c.delivered) price = c.final_price;
+      else if (c.contract_type === "Cash Forward") price = c.price ?? "";
+      else if (c.contract_type === "HTA (Hedge-to-Arrive)") price = c.locked_futures ?? "";
+      else if (c.contract_type === "Basis Contract") price = c.locked_basis ?? "";
+      return {
+        "Status": c.delivered ? "Delivered" : "Active",
+        "Wheat Type": c.wheat_type,
+        "Contract Type": c.contract_type,
+        "Bushels": c.bushels,
+        "Price ($/bu)": price,
+        "Delivery Period": c.delivery_period || "",
+        "Elevator": c.elevator || "",
+        "Date Entered": c.date_entered || "",
+        "Delivered Date": c.delivered_date || "",
+        "Notes": c.notes || "",
+      };
+    });
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), "Season Summary");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(contractRows), "Contracts");
+    XLSX.writeFile(wb, `Grain-Desk-${selectedYear}.xlsx`);
+  }
+
   async function handleSignOut() {
     await supabase.auth.signOut();
     router.push("/login");
@@ -779,6 +852,7 @@ export default function Dashboard() {
             { id: "board", label: "Price Log" },
             { id: "contracts", label: "Contract Ledger" },
             { id: "settings", label: "Breakevens" },
+            { id: "season", label: "Season Summary" },
           ].map((t) => (
             <button key={t.id} onClick={() => setTab(t.id)} className={`disp tab ${tab === t.id ? "active" : ""}`}>
               {t.label}
@@ -1261,6 +1335,40 @@ export default function Dashboard() {
                 </div>
               );
             })}
+          </section>
+        )}
+
+        {tab === "season" && (
+          <section style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+            <div className="card link-card">
+              <div>
+                <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Season Summary — {selectedYear}</h3>
+                <p className="mono" style={{ fontSize: 10, color: "var(--muted2)", marginTop: 4 }}>Delivered and still-active bushels, blended prices, and $ vs. breakeven for the whole crop year.</p>
+              </div>
+              <button onClick={exportToExcel} className="btn btn-primary">Export to Excel ↓</button>
+            </div>
+
+            {WHEAT_TYPES.map((wt) => {
+              const s = seasonStats[wt];
+              const p = perTypeStats[wt];
+              if (!s || s.totalBu === 0) return null;
+              return (
+                <div key={wt} className="card">
+                  <div className="disp" style={{ fontSize: 13, textTransform: "uppercase", color: "var(--blue)", marginBottom: 8 }}>{wt}</div>
+                  <div className="stat-grid">
+                    <Stat label="Total bushels" value={s.totalBu.toLocaleString()} />
+                    <Stat label="Delivered" value={s.deliveredBu.toLocaleString()} />
+                    <Stat label="Still active" value={s.openBu.toLocaleString()} />
+                    <Stat label="Blended delivered price" value={s.blendedDeliveredPrice !== null ? fmtC(s.blendedDeliveredPrice) : "—"} />
+                    <Stat label="% of crop priced" value={p.pctPriced !== null ? `${p.pctPriced.toFixed(0)}%` : "Set expected bu"} />
+                    <Stat label="$ vs. breakeven (all)" value={s.beDeltaTotal !== null ? fmt$(s.beDeltaTotal) : "Set breakeven"} tone={s.beDeltaTotal > 0 ? "gain" : s.beDeltaTotal < 0 ? "loss" : "flat"} />
+                  </div>
+                </div>
+              );
+            })}
+            <p className="mono note">
+              "Blended delivered price" averages only bushels you've actually marked delivered. "$ vs. breakeven (all)" adds up every contract for the year — delivered at final price, still-active priced contracts at their locked or what-if price — against your breakeven.
+            </p>
           </section>
         )}
         </>
