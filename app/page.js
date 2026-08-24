@@ -1,5 +1,7 @@
 "use client";
 
+export const dynamic = "force-dynamic";
+
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "../lib/supabaseClient";
@@ -104,7 +106,6 @@ export default function Dashboard() {
   const [tab, setTab] = useState("board");
   const [deliveringId, setDeliveringId] = useState(null);
   const [deliveryForm, setDeliveryForm] = useState({ date: todayISO(), finalPrice: "", finalFutures: "", finalBasis: "" });
-  const [showDelivered, setShowDelivered] = useState(false);
   const [splittingId, setSplittingId] = useState(null);
   const [splitForm, setSplitForm] = useState({
     bushels: "", contractType: "Cash Forward", price: "", lockedFutures: "", lockedBasis: "",
@@ -272,20 +273,50 @@ export default function Dashboard() {
 
   const totals = useMemo(() => {
     let bu = 0, priceValueLocked = 0, marketValue = 0, mtm = 0, be = 0, haveMtm = false, haveBe = false;
-    activeContracts.forEach((c) => {
+    yearContractStats.forEach((c) => {
       const b = Number(c.bushels) || 0;
       bu += b;
-      if (c.isPriced) priceValueLocked += b * Number(c.price);
-      if (c.mtmValue !== null) { marketValue += c.mtmValue; haveMtm = true; }
-      if (c.mtmDelta !== null) mtm += c.mtmDelta;
+      if (c.delivered) {
+        priceValueLocked += b * Number(c.final_price);
+        if (c.mtmValue !== null) {
+          marketValue += c.mtmValue;
+          haveMtm = true;
+          mtm += b * Number(c.final_price) - c.mtmValue;
+        }
+      } else {
+        if (c.isPriced) priceValueLocked += b * Number(c.price);
+        if (c.mtmValue !== null) { marketValue += c.mtmValue; haveMtm = true; }
+        if (c.mtmDelta !== null) mtm += c.mtmDelta;
+      }
       if (c.beDelta !== null) { be += c.beDelta; haveBe = true; }
     });
     return { bu, priceValueLocked, marketValue, mtm, be, haveMtm, haveBe };
-  }, [activeContracts]);
+  }, [yearContractStats]);
 
   // "Fully priced" = Cash Forward (priced) + any delivered contract, since the
   // final price is actually known. HTA/Basis contracts count as "partially
   // hedged" until delivered, since one leg is still open.
+  const seasonStats = useMemo(() => {
+    const out = {};
+    WHEAT_TYPES.forEach((wt) => {
+      const rows = yearContractStats.filter((c) => c.wheat_type === wt);
+      let totalBu = 0, deliveredBu = 0, deliveredValue = 0, openBu = 0, beDeltaTotal = 0, haveBe = false;
+      rows.forEach((c) => {
+        const b = Number(c.bushels) || 0;
+        totalBu += b;
+        if (c.delivered) { deliveredBu += b; deliveredValue += b * Number(c.final_price); }
+        else { openBu += b; }
+        if (c.beDelta !== null) { beDeltaTotal += c.beDelta; haveBe = true; }
+      });
+      out[wt] = {
+        totalBu, deliveredBu, openBu,
+        blendedDeliveredPrice: deliveredBu > 0 ? deliveredValue / deliveredBu : null,
+        beDeltaTotal: haveBe ? beDeltaTotal : null,
+      };
+    });
+    return out;
+  }, [yearContractStats]);
+
   const perTypeStats = useMemo(() => {
     const out = {};
     WHEAT_TYPES.forEach((wt) => {
@@ -631,6 +662,58 @@ export default function Dashboard() {
     );
   }
 
+  async function exportToExcel() {
+    if (!selectedYear) { alert("Select a crop year first."); return; }
+    const XLSX = await import("xlsx");
+
+    const summaryRows = WHEAT_TYPES.map((wt) => {
+      const s = seasonStats[wt];
+      const p = perTypeStats[wt];
+      const be = breakevens[selectedYear]?.[wt] || {};
+      return {
+        "Wheat Type": wt,
+        "Total Bushels": s.totalBu,
+        "Delivered Bushels": s.deliveredBu,
+        "Still Active Bushels": s.openBu,
+        "Blended Delivered Price ($/bu)": s.blendedDeliveredPrice !== null ? Number(s.blendedDeliveredPrice.toFixed(4)) : "",
+        "Fully Priced Bushels (incl. delivered)": p.fullyPricedBu,
+        "% of Crop Priced": p.pctPriced !== null ? Number(p.pctPriced.toFixed(1)) : "",
+        "Blended Avg Price, Fully Priced ($/bu)": p.blendedPrice !== null ? Number(p.blendedPrice.toFixed(4)) : "",
+        "Breakeven ($/bu)": be.value ?? "",
+        "$ vs Breakeven (all contracts)": s.beDeltaTotal !== null ? Number(s.beDeltaTotal.toFixed(2)) : "",
+        "Seeded Acres": be.seededAcres ?? "",
+        "Projected Yield (bu/acre)": be.projectedYield ?? "",
+        "Expected Bushels": p.expectedBushels ?? "",
+        "Which Fields": be.fieldNotes ?? "",
+      };
+    });
+
+    const contractRows = yearContractStats.map((c) => {
+      let price = "";
+      if (c.delivered) price = c.final_price;
+      else if (c.contract_type === "Cash Forward") price = c.price ?? "";
+      else if (c.contract_type === "HTA (Hedge-to-Arrive)") price = c.locked_futures ?? "";
+      else if (c.contract_type === "Basis Contract") price = c.locked_basis ?? "";
+      return {
+        "Status": c.delivered ? "Delivered" : "Active",
+        "Wheat Type": c.wheat_type,
+        "Contract Type": c.contract_type,
+        "Bushels": c.bushels,
+        "Price ($/bu)": price,
+        "Delivery Period": c.delivery_period || "",
+        "Elevator": c.elevator || "",
+        "Date Entered": c.date_entered || "",
+        "Delivered Date": c.delivered_date || "",
+        "Notes": c.notes || "",
+      };
+    });
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), "Season Summary");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(contractRows), "Contracts");
+    XLSX.writeFile(wb, `Grain-Desk-${selectedYear}.xlsx`);
+  }
+
   async function handleSignOut() {
     await supabase.auth.signOut();
     router.push("/login");
@@ -738,7 +821,7 @@ export default function Dashboard() {
             </div>
           )}
           <p className="mono note">
-            "Locked vs. today's market" compares what you locked in on priced contracts to what those bushels would be worth at today's most recent cash price. Positive means your locked price beats today's market; negative means the market has moved above what you locked in. These totals reflect open contracts only — delivered/settled contracts are tracked separately in the Contract Ledger tab.
+            "Locked vs. today's market" compares what you locked in — on priced contracts and delivered ones alike — to what those bushels would be worth at today's most recent cash price. Positive means your locked/final price beats today's market; negative means the market has moved above what you got. These totals include every contract for the selected crop year, active and delivered.
           </p>
 
           <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 16 }}>
@@ -771,6 +854,7 @@ export default function Dashboard() {
             { id: "board", label: "Price Log" },
             { id: "contracts", label: "Contract Ledger" },
             { id: "settings", label: "Breakevens" },
+            { id: "season", label: "Season Summary" },
           ].map((t) => (
             <button key={t.id} onClick={() => setTab(t.id)} className={`disp tab ${tab === t.id ? "active" : ""}`}>
               {t.label}
@@ -979,23 +1063,36 @@ export default function Dashboard() {
 
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Wheat</th><th>Type</th><th>Bu</th><th>Locked</th><th>What if priced now</th><th>Current cash $</th><th>Delivery</th><th>Elevator</th><th>Notes</th><th>vs. market</th><th></th></tr></thead>
+                <thead><tr><th>Status</th><th>Wheat</th><th>Type</th><th>Bu</th><th>Locked</th><th>What if priced now</th><th>Current cash $</th><th>Delivery</th><th>Elevator</th><th>Notes</th><th>vs. market / breakeven</th><th></th></tr></thead>
                 <tbody>
-                  {activeContracts.length === 0 && <tr><td colSpan={11} className="empty-row">No active contracts.</td></tr>}
-                  {activeContracts.map((c) => (
+                  {yearContractStats.length === 0 && <tr><td colSpan={12} className="empty-row">No contracts yet.</td></tr>}
+                  {yearContractStats.map((c) => (
                     <React.Fragment key={c.id}>
                       <tr>
+                        <td className="mono">
+                          {c.delivered ? (
+                            <span className="gain">Delivered<br /><span style={{ fontSize: 10, color: "var(--muted2)" }}>{c.delivered_date}</span></span>
+                          ) : (
+                            <span style={{ color: "var(--muted)" }}>Active</span>
+                          )}
+                        </td>
                         <td className="mono">{c.wheat_type}</td>
                         <td className="mono">{c.contract_type}</td>
                         <td className="mono">{Number(c.bushels).toLocaleString()}</td>
                         <td className="mono">
-                          {c.contract_type === "Cash Forward" && (c.isPriced ? fmtC(c.price) : "Open")}
-                          {c.contract_type === "HTA (Hedge-to-Arrive)" && (c.locked_futures !== null && c.locked_futures !== undefined ? `Fut ${fmtC(c.locked_futures)} · basis open` : "Open")}
-                          {c.contract_type === "Basis Contract" && (c.locked_basis !== null && c.locked_basis !== undefined ? `Basis ${fmtC(c.locked_basis)} · fut open` : "Open")}
-                          {c.contract_type === "Unpriced / Stored" && "Open"}
+                          {c.delivered ? (
+                            <strong>{fmtC(c.final_price)}</strong>
+                          ) : (
+                            <>
+                              {c.contract_type === "Cash Forward" && (c.isPriced ? fmtC(c.price) : "Open")}
+                              {c.contract_type === "HTA (Hedge-to-Arrive)" && (c.locked_futures !== null && c.locked_futures !== undefined ? `Fut ${fmtC(c.locked_futures)} · basis open` : "Open")}
+                              {c.contract_type === "Basis Contract" && (c.locked_basis !== null && c.locked_basis !== undefined ? `Basis ${fmtC(c.locked_basis)} · fut open` : "Open")}
+                              {c.contract_type === "Unpriced / Stored" && "Open"}
+                            </>
+                          )}
                         </td>
                         <td className="mono">
-                          {c.whatIfPrice !== null ? (
+                          {c.delivered ? "—" : c.whatIfPrice !== null ? (
                             <span>
                               {fmtC(c.whatIfPrice)}
                               {c.contract_type === "Unpriced / Stored" && c.mtmValue !== null && (
@@ -1008,31 +1105,39 @@ export default function Dashboard() {
                           ) : "—"}
                         </td>
                         <td className="mono">
-                          {fmtC(c.currentCash)}
-                          {c.currentCash !== null && (
-                            <span className="mono" style={{ fontSize: 9, color: c.usingMonthPrice ? "var(--gain)" : "var(--muted2)", display: "block" }}>
-                              {c.usingMonthPrice ? `${c.delivery_period} price` : "general/nearby"}
-                            </span>
+                          {c.delivered ? "—" : (
+                            <>
+                              {fmtC(c.currentCash)}
+                              {c.currentCash !== null && (
+                                <span className="mono" style={{ fontSize: 9, color: c.usingMonthPrice ? "var(--gain)" : "var(--muted2)", display: "block" }}>
+                                  {c.usingMonthPrice ? `${c.delivery_period} price` : "general/nearby"}
+                                </span>
+                              )}
+                            </>
                           )}
                         </td>
                         <td className="mono">{c.delivery_period || "—"}</td>
                         <td className="mono">{c.elevator || "—"}</td>
                         <td className="mono" title={c.notes || ""} style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.notes || "—"}</td>
                         <td className="mono">
-                          {c.isPriced && c.mtmDelta !== null ? <span className={c.mtmDelta > 0 ? "gain" : c.mtmDelta < 0 ? "loss" : ""}>{fmt$(c.mtmDelta)}</span> : "—"}
+                          {c.delivered
+                            ? (c.beDelta !== null ? <span className={c.beDelta > 0 ? "gain" : c.beDelta < 0 ? "loss" : ""}>{fmt$(c.beDelta)}</span> : "—")
+                            : (c.isPriced && c.mtmDelta !== null ? <span className={c.mtmDelta > 0 ? "gain" : c.mtmDelta < 0 ? "loss" : ""}>{fmt$(c.mtmDelta)}</span> : "—")}
                         </td>
                         <td style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                           <button onClick={() => startEdit(c)} className="btn-link" style={{ color: "var(--muted)" }}>Edit</button>
-                          {c.contract_type === "Unpriced / Stored" && (
+                          {!c.delivered && c.contract_type === "Unpriced / Stored" && (
                             <button onClick={() => startSplit(c)} className="btn-link" style={{ color: "var(--orange)" }}>Price this</button>
                           )}
-                          <button onClick={() => startDelivery(c)} className="btn-link" style={{ color: "var(--blue)" }}>Mark delivered</button>
+                          {!c.delivered && (
+                            <button onClick={() => startDelivery(c)} className="btn-link" style={{ color: "var(--blue)" }}>Mark delivered</button>
+                          )}
                           <button onClick={() => deleteContract(c.id)} className="btn-link">Remove</button>
                         </td>
                       </tr>
                       {editingId === c.id && (
                         <tr>
-                          <td colSpan={11}>
+                          <td colSpan={12}>
                             <div className="card" style={{ background: "#FFFFFF" }}>
                               <div className="form-grid">
                                 <Field label="Wheat type">
@@ -1089,7 +1194,7 @@ export default function Dashboard() {
                       )}
                       {splittingId === c.id && (
                         <tr>
-                          <td colSpan={11}>
+                          <td colSpan={12}>
                             <div className="card" style={{ background: "#FFFFFF" }}>
                               <p className="mono note" style={{ marginTop: 0 }}>
                                 Pulls bushels out of this Unpriced/Stored contract ({Number(c.bushels).toLocaleString()} bu available) and creates a new priced contract with them. The elevator and delivery period below are pre-filled from this contract — edit if the new contract is going somewhere different.
@@ -1143,7 +1248,7 @@ export default function Dashboard() {
                       )}
                       {deliveringId === c.id && (
                         <tr>
-                          <td colSpan={11}>
+                          <td colSpan={12}>
                             <div className="card" style={{ background: "#FFFFFF" }}>
                               <div className="form-grid">
                                 <Field label="Delivery date">
@@ -1179,35 +1284,8 @@ export default function Dashboard() {
               </table>
             </div>
             <p className="mono note">
-              "What if priced now" shows what you'd get if you locked in the remaining open piece of a contract at today's market. For HTA and Basis Contracts, it fills in whichever leg (futures or basis) is still open, with the $ gain/loss versus today's cash price in parentheses. For Unpriced/Stored, it's today's cash price along with what that specific batch of bushels would be worth in total if sold right now. Cash Forward contracts are already fully locked, so there's nothing to show here.
+              "What if priced now" shows what you'd get if you locked in the remaining open piece of a contract at today's market. For HTA and Basis Contracts, it fills in whichever leg (futures or basis) is still open, with the $ gain/loss versus today's cash price in parentheses. For Unpriced/Stored, it's today's cash price along with what that specific batch of bushels would be worth in total if sold right now. Cash Forward contracts are already fully locked, so there's nothing to show here. Delivered contracts show their final price and how it landed versus your breakeven, if set.
             </p>
-
-            <button onClick={() => setShowDelivered((s) => !s)} className="disp tab" style={{ borderBottom: "none", paddingLeft: 0 }}>
-              {showDelivered ? "Hide" : "Show"} delivered contracts ({deliveredContracts.length})
-            </button>
-            {showDelivered && (
-              <div className="table-wrap">
-                <table>
-                  <thead><tr><th>Wheat</th><th>Type</th><th>Bu</th><th>Final price</th><th>Delivered</th><th>vs. breakeven</th><th>Elevator</th></tr></thead>
-                  <tbody>
-                    {deliveredContracts.length === 0 && <tr><td colSpan={7} className="empty-row">No delivered contracts yet.</td></tr>}
-                    {deliveredContracts.map((c) => (
-                      <tr key={c.id}>
-                        <td className="mono">{c.wheat_type}</td>
-                        <td className="mono">{c.contract_type}</td>
-                        <td className="mono">{Number(c.bushels).toLocaleString()}</td>
-                        <td className="mono">{fmtC(c.final_price)}</td>
-                        <td className="mono">{c.delivered_date || "—"}</td>
-                        <td className="mono">
-                          {c.beDelta !== null ? <span className={c.beDelta > 0 ? "gain" : c.beDelta < 0 ? "loss" : ""}>{fmt$(c.beDelta)}</span> : "—"}
-                        </td>
-                        <td className="mono">{c.elevator || "—"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
           </section>
         )}
 
@@ -1259,6 +1337,40 @@ export default function Dashboard() {
                 </div>
               );
             })}
+          </section>
+        )}
+
+        {tab === "season" && (
+          <section style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+            <div className="card link-card">
+              <div>
+                <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Season Summary — {selectedYear}</h3>
+                <p className="mono" style={{ fontSize: 10, color: "var(--muted2)", marginTop: 4 }}>Delivered and still-active bushels, blended prices, and $ vs. breakeven for the whole crop year.</p>
+              </div>
+              <button onClick={exportToExcel} className="btn btn-primary">Export to Excel ↓</button>
+            </div>
+
+            {WHEAT_TYPES.map((wt) => {
+              const s = seasonStats[wt];
+              const p = perTypeStats[wt];
+              if (!s || s.totalBu === 0) return null;
+              return (
+                <div key={wt} className="card">
+                  <div className="disp" style={{ fontSize: 13, textTransform: "uppercase", color: "var(--blue)", marginBottom: 8 }}>{wt}</div>
+                  <div className="stat-grid">
+                    <Stat label="Total bushels" value={s.totalBu.toLocaleString()} />
+                    <Stat label="Delivered" value={s.deliveredBu.toLocaleString()} />
+                    <Stat label="Still active" value={s.openBu.toLocaleString()} />
+                    <Stat label="Blended delivered price" value={s.blendedDeliveredPrice !== null ? fmtC(s.blendedDeliveredPrice) : "—"} />
+                    <Stat label="% of crop priced" value={p.pctPriced !== null ? `${p.pctPriced.toFixed(0)}%` : "Set expected bu"} />
+                    <Stat label="$ vs. breakeven (all)" value={s.beDeltaTotal !== null ? fmt$(s.beDeltaTotal) : "Set breakeven"} tone={s.beDeltaTotal > 0 ? "gain" : s.beDeltaTotal < 0 ? "loss" : "flat"} />
+                  </div>
+                </div>
+              );
+            })}
+            <p className="mono note">
+              "Blended delivered price" averages only bushels you've actually marked delivered. "$ vs. breakeven (all)" adds up every contract for the year — delivered at final price, still-active priced contracts at their locked or what-if price — against your breakeven.
+            </p>
           </section>
         )}
         </>
