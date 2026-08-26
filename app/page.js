@@ -39,7 +39,7 @@ function getNearestMonth(trackedMonths, wheatType) {
 // "General/nearby" price: the latest logged entry with no specific
 // delivery month attached.
 function getGeneralPrice(prices, wheatType) {
-  const rows = prices.filter((r) => r.wheat_type === wheatType && !r.delivery_month).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const rows = prices.filter((r) => r.wheat_type === wheatType && !r.delivery_month).sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at));
   if (rows.length === 0) return null;
   const cashRow = rows.find((r) => r.cash_price !== null && r.cash_price !== undefined);
   const futRow = rows.find((r) => r.futures_price !== null && r.futures_price !== undefined);
@@ -50,6 +50,7 @@ function getGeneralPrice(prices, wheatType) {
     futuresMarket: futRow ? futRow.futures_market : null,
     basis: basisRow ? Number(basisRow.basis) : null,
     date: rows[0].date,
+    loggedAt: rows[0].updated_at || rows[0].created_at,
   };
 }
 
@@ -70,6 +71,10 @@ function getBestPrice(prices, wheatType, nearestMonth) {
 }
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
+const fmtLoggedAt = (ts) => {
+  if (!ts) return "—";
+  return new Date(ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+};
 
 // Finds the most recent price row for a wheat type + specific delivery
 // month. Used so contracts price off the month that actually matches
@@ -78,7 +83,7 @@ function getMonthPrice(prices, wheatType, monthLabel) {
   if (!monthLabel) return null;
   const rows = prices
     .filter((r) => r.wheat_type === wheatType && r.delivery_month === monthLabel)
-    .sort((a, b) => (a.date < b.date ? 1 : -1));
+    .sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at));
   if (rows.length === 0) return null;
   const cashRow = rows.find((r) => r.cash_price !== null && r.cash_price !== undefined);
   const futRow = rows.find((r) => r.futures_price !== null && r.futures_price !== undefined);
@@ -89,6 +94,7 @@ function getMonthPrice(prices, wheatType, monthLabel) {
     futuresMarket: futRow ? futRow.futures_market : null,
     basis: basisRow ? Number(basisRow.basis) : null,
     date: rows[0].date,
+    loggedAt: rows[0].updated_at || rows[0].created_at,
   };
 }
 
@@ -226,6 +232,7 @@ export default function Dashboard() {
         value,
         cashDate: best?.date ?? null,
         futDate: best?.date ?? null,
+        loggedAt: best?.loggedAt ?? null,
         futMarket: best?.futuresMarket || FUTURES_FOR_TYPE[wt],
       };
     });
@@ -431,6 +438,7 @@ export default function Dashboard() {
       cash_price: has(cashPrice) ? Number(cashPrice) : null,
       basis: has(basis) ? Number(basis) : null,
       elevator: editPriceForm.elevator || null,
+      updated_at: new Date().toISOString(),
     }).eq("id", r.id);
     if (error) { alert("Couldn't save changes: " + error.message); return; }
     setEditingPriceId(null);
@@ -767,7 +775,7 @@ export default function Dashboard() {
                 </div>
                 <div className="mono tile-sub">
                   {basisByType[wt].value !== null
-                    ? `general/nearby · as of ${basisByType[wt].cashDate}`
+                    ? `general/nearby · as of ${fmtLoggedAt(basisByType[wt].loggedAt)}`
                     : "needs cash & futures"}
                 </div>
               </div>
@@ -1439,7 +1447,7 @@ function DeliveryMonthPrices({ prices, trackedMonths }) {
                     <span className={Number(r.p.basis) < 0 ? "loss" : Number(r.p.basis) > 0 ? "gain" : ""}>{fmtC(r.p.basis)}</span>
                   ) : "—"}
                 </td>
-                <td className="mono" style={{ fontSize: 11, color: "var(--muted2)" }}>{r.p ? r.p.date : "no data yet"}</td>
+                <td className="mono" style={{ fontSize: 11, color: "var(--muted2)" }}>{r.p ? fmtLoggedAt(r.p.loggedAt) : "no data yet"}</td>
               </tr>
             ))}
           </tbody>
