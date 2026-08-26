@@ -1463,34 +1463,10 @@ function BasisChart({ prices, trackedMonths }) {
   const colors = { "Soft White Winter": "#C9942F", "Hard Red Winter": "#1D5D9B" };
 
   const series = WHEAT_TYPES.map((wt) => {
-    const months = trackedMonths[wt] || [];
-    const today = new Date(); today.setDate(1);
-    const sortedByProximity = [...months].sort((a, b) => {
-      const da = parseMonthLabel(a), db = parseMonthLabel(b);
-      const futureA = da >= today, futureB = db >= today;
-      if (futureA && !futureB) return -1;
-      if (!futureA && futureB) return 1;
-      return futureA ? da - db : db - da;
-    });
-
-    // Use the nearest tracked month that actually has 2+ logged basis
-    // points; fall back through the rest, then to general/nearby.
-    let chosen = null;
-    let points = [];
-    for (const m of sortedByProximity) {
-      const pts = prices
-        .filter((r) => r.wheat_type === wt && r.basis !== null && r.basis !== undefined && r.delivery_month === m)
-        .sort((a, b) => (a.date < b.date ? -1 : 1));
-      if (pts.length >= 2) { chosen = m; points = pts; break; }
-    }
-    if (!chosen) {
-      const generalPts = prices
-        .filter((r) => r.wheat_type === wt && r.basis !== null && r.basis !== undefined && !r.delivery_month)
-        .sort((a, b) => (a.date < b.date ? -1 : 1));
-      if (generalPts.length >= 2) points = generalPts;
-    }
-
-    return { wt, color: colors[wt], nearest: chosen, points };
+    const points = prices
+      .filter((r) => r.wheat_type === wt && r.basis !== null && r.basis !== undefined && !r.delivery_month)
+      .sort((a, b) => (a.date < b.date ? -1 : 1));
+    return { wt, color: colors[wt], nearest: null, points };
   });
 
   const allPoints = series.flatMap((s) => s.points);
@@ -1499,7 +1475,7 @@ function BasisChart({ prices, trackedMonths }) {
       <div className="card">
         <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Basis Over Time</h3>
         <p className="mono" style={{ fontSize: 12, color: "var(--muted2)", marginTop: 8 }}>
-          Log basis (or both cash and futures) for the nearest tracked month on at least two different dates to see a trend line here.
+          Log basis (or both cash and futures) as "General / nearby" on at least two different dates to see a trend line here.
         </p>
       </div>
     );
@@ -1527,9 +1503,22 @@ function BasisChart({ prices, trackedMonths }) {
   const gridLevels = 4;
   const gridValues = Array.from({ length: gridLevels + 1 }, (_, i) => minB + (i / gridLevels) * (maxB - minB));
 
-  // One date label per unique date across both series, so labels don't repeat
-  // when both wheat types were logged the same day.
-  const uniqueDates = [...new Set(allPoints.map((p) => p.date))].sort();
+  // Weekly tick marks spanning the plotted date range, instead of one label
+  // per logged date — keeps the axis readable once you're logging daily.
+  const weekTicks = [];
+  {
+    const start = new Date(minDate);
+    const end = new Date(maxDate);
+    let d = new Date(start);
+    while (d.getTime() <= end.getTime()) {
+      weekTicks.push(d.toISOString().slice(0, 10));
+      d = new Date(d.getTime() + 7 * 24 * 60 * 60 * 1000);
+    }
+    if (weekTicks.length === 0) weekTicks.push(start.toISOString().slice(0, 10));
+    // always include the most recent date so the chart doesn't cut off early
+    const lastLabel = end.toISOString().slice(0, 10);
+    if (weekTicks[weekTicks.length - 1] !== lastLabel) weekTicks.push(lastLabel);
+  }
   const formatDate = (d) => {
     const dt = new Date(d + "T00:00:00");
     return dt.toLocaleDateString(undefined, { month: "numeric", day: "numeric" });
@@ -1546,8 +1535,8 @@ function BasisChart({ prices, trackedMonths }) {
           </g>
         ))}
 
-        {uniqueDates.map((d, i) => (
-          <g key={d}>
+        {weekTicks.map((d, i) => (
+          <g key={d + i}>
             <line x1={xScale(d)} x2={xScale(d)} y1={padTop} y2={height - padBottom} style={{ stroke: "var(--border)" }} strokeDasharray="2 4" strokeWidth={0.75} />
             <text
               x={xScale(d)}
