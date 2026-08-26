@@ -1458,119 +1458,310 @@ function Field({ label, children }) {
   );
 }
 
+const MONTH_STARTS = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function dayOfYear(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  const start = new Date(d.getFullYear(), 0, 1);
+  return Math.round((d - start) / 86400000);
+}
+
 function BasisChart({ prices, trackedMonths }) {
-  const width = 640, height = 260, padLeft = 56, padRight = 16, padTop = 16, padBottom = 40;
+  const [mode, setMode] = useState("timeline"); // "timeline" | "compare"
+  const [range, setRange] = useState("90d"); // "30d" | "90d" | "season" | "all"
+  const [visible, setVisible] = useState({ "Soft White Winter": true, "Hard Red Winter": true });
+  const [compareType, setCompareType] = useState("Soft White Winter");
+  const [source, setSource] = useState("general"); // "general" or a specific tracked month label
+  const [hovered, setHovered] = useState(null);
+
+  const allTrackedMonths = [...new Set([...(trackedMonths["Soft White Winter"] || []), ...(trackedMonths["Hard Red Winter"] || [])])];
+  const matchesSource = (r) => (source === "general" ? !r.delivery_month : r.delivery_month === source);
+  const sourceLabel = source === "general" ? "general/nearby" : source;
+
+  const width = 680, height = 300, padLeft = 56, padRight = 16, padTop = 16, padBottom = 40;
   const colors = { "Soft White Winter": "#C9942F", "Hard Red Winter": "#1D5D9B" };
+  const yearPalette = ["#1D5D9B", "#C9942F", "#2F9E5B", "#8B5CF6", "#D6483A", "#0EA5E9"];
+  const plotW = width - padLeft - padRight;
+  const plotH = height - padTop - padBottom;
 
-  const series = WHEAT_TYPES.map((wt) => {
-    const points = prices
-      .filter((r) => r.wheat_type === wt && r.basis !== null && r.basis !== undefined && !r.delivery_month)
+  const baseByType = {};
+  WHEAT_TYPES.forEach((wt) => {
+    baseByType[wt] = prices
+      .filter((r) => r.wheat_type === wt && r.basis !== null && r.basis !== undefined && matchesSource(r))
       .sort((a, b) => (a.date < b.date ? -1 : 1));
-    return { wt, color: colors[wt], nearest: null, points };
   });
+  const totalPoints = WHEAT_TYPES.reduce((n, wt) => n + baseByType[wt].length, 0);
 
-  const allPoints = series.flatMap((s) => s.points);
-  if (allPoints.length < 2) {
+  const controls = (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 12, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 4 }}>
+        {[{ id: "timeline", label: "Timeline" }, { id: "compare", label: "Compare Years" }].map((m) => (
+          <button key={m.id} onClick={() => setMode(m.id)} className="disp"
+            style={{ fontSize: 11, padding: "4px 10px", borderRadius: 6, border: "1px solid var(--border)", background: mode === m.id ? "var(--blue)" : "#FFFFFF", color: mode === m.id ? "#FFFFFF" : "var(--ink)", cursor: "pointer" }}>
+            {m.label}
+          </button>
+        ))}
+      </div>
+      {mode === "timeline" && (
+        <div style={{ display: "flex", gap: 4 }}>
+          {[{ id: "30d", label: "30d" }, { id: "90d", label: "90d" }, { id: "season", label: "This year" }, { id: "all", label: "All" }].map((r) => (
+            <button key={r.id} onClick={() => setRange(r.id)} className="mono"
+              style={{ fontSize: 11, padding: "4px 10px", borderRadius: 6, border: "1px solid var(--border)", background: range === r.id ? "var(--orange)" : "#FFFFFF", color: range === r.id ? "var(--ink)" : "var(--muted)", cursor: "pointer" }}>
+              {r.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {mode === "compare" && (
+        <select value={compareType} onChange={(e) => setCompareType(e.target.value)} style={{ maxWidth: 180 }}>
+          {WHEAT_TYPES.map((w) => <option key={w}>{w}</option>)}
+        </select>
+      )}
+      <select value={source} onChange={(e) => setSource(e.target.value)} style={{ maxWidth: 180 }}>
+        <option value="general">General / nearby</option>
+        {allTrackedMonths.map((m) => <option key={m} value={m}>{m}</option>)}
+      </select>
+    </div>
+  );
+
+  if (totalPoints < 2) {
     return (
       <div className="card">
         <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Basis Over Time</h3>
-        <p className="mono" style={{ fontSize: 12, color: "var(--muted2)", marginTop: 8 }}>
-          Log basis (or both cash and futures) as "General / nearby" on at least two different dates to see a trend line here.
+        {controls}
+        <p className="mono" style={{ fontSize: 12, color: "var(--muted2)" }}>
+          Log basis (or both cash and futures) as "{sourceLabel}" on at least two different dates to see a trend line here.
         </p>
       </div>
     );
   }
 
-  const dates = allPoints.map((p) => new Date(p.date).getTime());
-  const minDate = Math.min(...dates), maxDate = Math.max(...dates);
-  const basisVals = allPoints.map((p) => Number(p.basis));
-  let minB = Math.min(...basisVals), maxB = Math.max(...basisVals);
-  if (minB === maxB) { minB -= 0.1; maxB += 0.1; }
-  const pad = (maxB - minB) * 0.15;
-  minB -= pad; maxB += pad;
-
-  const plotW = width - padLeft - padRight;
-  const plotH = height - padTop - padBottom;
-
-  const xScale = (d) => {
-    const t = new Date(d).getTime();
-    if (maxDate === minDate) return padLeft + plotW / 2;
-    return padLeft + ((t - minDate) / (maxDate - minDate)) * plotW;
-  };
-  const yScale = (v) => padTop + plotH - ((v - minB) / (maxB - minB)) * plotH;
-
-  // Horizontal gridlines with a value label at each level.
-  const gridLevels = 4;
-  const gridValues = Array.from({ length: gridLevels + 1 }, (_, i) => minB + (i / gridLevels) * (maxB - minB));
-
-  // Weekly tick marks spanning the plotted date range, instead of one label
-  // per logged date — keeps the axis readable once you're logging daily.
-  const weekTicks = [];
-  {
-    const start = new Date(minDate);
-    const end = new Date(maxDate);
-    let d = new Date(start);
-    while (d.getTime() <= end.getTime()) {
-      weekTicks.push(d.toISOString().slice(0, 10));
-      d = new Date(d.getTime() + 7 * 24 * 60 * 60 * 1000);
-    }
-    if (weekTicks.length === 0) weekTicks.push(start.toISOString().slice(0, 10));
-    // always include the most recent date so the chart doesn't cut off early
-    const lastLabel = end.toISOString().slice(0, 10);
-    if (weekTicks[weekTicks.length - 1] !== lastLabel) weekTicks.push(lastLabel);
+  function Tooltip({ x, y, label, value, dateLabel }) {
+    const boxW = 96, boxH = 34;
+    const bx = Math.min(Math.max(x - boxW / 2, padLeft), width - padRight - boxW);
+    const by = y - boxH - 10 < padTop ? y + 10 : y - boxH - 10;
+    return (
+      <g>
+        <rect x={bx} y={by} width={boxW} height={boxH} rx={4} style={{ fill: "#16321F" }} />
+        <text x={bx + 8} y={by + 14} className="mono" style={{ fontSize: 10, fill: "#FFFFFF" }}>{dateLabel}</text>
+        <text x={bx + 8} y={by + 27} className="mono" style={{ fontSize: 11, fill: "#FFFFFF", fontWeight: 600 }}>{label}: {fmtC(value)}</text>
+      </g>
+    );
   }
-  const formatDate = (d) => {
-    const dt = new Date(d + "T00:00:00");
-    return dt.toLocaleDateString(undefined, { month: "numeric", day: "numeric" });
-  };
+
+  // ---- TIMELINE MODE ----
+  if (mode === "timeline") {
+    function filterByRange(points) {
+      if (range === "all") return points;
+      const now = new Date();
+      let cutoff;
+      if (range === "30d") cutoff = new Date(now.getTime() - 30 * 86400000);
+      else if (range === "90d") cutoff = new Date(now.getTime() - 90 * 86400000);
+      else cutoff = new Date(now.getFullYear(), 0, 1);
+      return points.filter((p) => new Date(p.date + "T00:00:00") >= cutoff);
+    }
+
+    const series = WHEAT_TYPES.filter((wt) => visible[wt]).map((wt) => ({
+      wt, color: colors[wt], points: filterByRange(baseByType[wt]),
+    }));
+    const allPoints = series.flatMap((s) => s.points);
+
+    if (allPoints.length < 2) {
+      return (
+        <div className="card">
+          <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Basis Over Time</h3>
+          {controls}
+          <p className="mono" style={{ fontSize: 12, color: "var(--muted2)" }}>Not enough logged data in this range/selection yet — try a wider range.</p>
+        </div>
+      );
+    }
+
+    const dates = allPoints.map((p) => new Date(p.date).getTime());
+    const minDate = Math.min(...dates), maxDate = Math.max(...dates);
+    const basisVals = allPoints.map((p) => Number(p.basis));
+    let minB = Math.min(...basisVals), maxB = Math.max(...basisVals);
+    if (minB === maxB) { minB -= 0.1; maxB += 0.1; }
+    const pad = (maxB - minB) * 0.15;
+    minB -= pad; maxB += pad;
+
+    const xScale = (d) => {
+      const t = new Date(d).getTime();
+      if (maxDate === minDate) return padLeft + plotW / 2;
+      return padLeft + ((t - minDate) / (maxDate - minDate)) * plotW;
+    };
+    const yScale = (v) => padTop + plotH - ((v - minB) / (maxB - minB)) * plotH;
+
+    const gridLevels = 4;
+    const gridValues = Array.from({ length: gridLevels + 1 }, (_, i) => minB + (i / gridLevels) * (maxB - minB));
+
+    const weekTicks = [];
+    {
+      const start = new Date(minDate);
+      const end = new Date(maxDate);
+      let d = new Date(start);
+      while (d.getTime() <= end.getTime()) {
+        weekTicks.push(d.toISOString().slice(0, 10));
+        d = new Date(d.getTime() + 7 * 24 * 60 * 60 * 1000);
+      }
+      if (weekTicks.length === 0) weekTicks.push(start.toISOString().slice(0, 10));
+      const lastLabel = end.toISOString().slice(0, 10);
+      if (weekTicks[weekTicks.length - 1] !== lastLabel) weekTicks.push(lastLabel);
+    }
+    const formatDate = (d) => new Date(d + "T00:00:00").toLocaleDateString(undefined, { month: "numeric", day: "numeric" });
+
+    return (
+      <div className="card">
+        <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Basis Over Time</h3>
+        {controls}
+        <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", height: "auto" }}>
+          <rect x={0} y={0} width={width} height={height} fill="transparent" onClick={() => setHovered(null)} />
+          {gridValues.map((v, i) => (
+            <g key={i}>
+              <line x1={padLeft} x2={width - padRight} y1={yScale(v)} y2={yScale(v)} style={{ stroke: "var(--border)" }} strokeDasharray={Math.abs(v) < 1e-9 ? "0" : "3 3"} strokeWidth={Math.abs(v) < 1e-9 ? 1.5 : 1} />
+              <text x={padLeft - 6} y={yScale(v) + 3} textAnchor="end" className="mono" style={{ fontSize: 10, fill: "var(--muted2)" }}>{fmtC(v)}</text>
+            </g>
+          ))}
+          {weekTicks.map((d, i) => (
+            <g key={d + i}>
+              <line x1={xScale(d)} x2={xScale(d)} y1={padTop} y2={height - padBottom} style={{ stroke: "var(--border)" }} strokeDasharray="2 4" strokeWidth={0.75} />
+              <text x={xScale(d)} y={height - padBottom + 16} textAnchor="middle" className="mono" style={{ fontSize: 10, fill: "var(--muted2)" }}>{formatDate(d)}</text>
+            </g>
+          ))}
+
+          {series.map((s) => {
+            if (s.points.length === 0) return null;
+            const avg = s.points.reduce((sum, p) => sum + Number(p.basis), 0) / s.points.length;
+            return (
+              <g key={s.wt + "-avg"}>
+                <line x1={padLeft} x2={width - padRight} y1={yScale(avg)} y2={yScale(avg)} style={{ stroke: s.color }} strokeDasharray="6 4" strokeWidth={1.25} opacity={0.6} />
+                <text x={width - padRight - 4} y={yScale(avg) - 4} textAnchor="end" className="mono" style={{ fontSize: 9, fill: s.color }}>avg {fmtC(avg)}</text>
+              </g>
+            );
+          })}
+
+          {series.map((s) => s.points.length >= 2 && (
+            <polyline key={s.wt} fill="none" strokeWidth="2" style={{ stroke: s.color }}
+              points={s.points.map((p) => `${xScale(p.date)},${yScale(Number(p.basis))}`).join(" ")} />
+          ))}
+          {series.map((s) => s.points.map((p, i) => (
+            <circle key={s.wt + i} cx={xScale(p.date)} cy={yScale(Number(p.basis))} r={hovered && hovered.wt === s.wt && hovered.i === i ? 5 : 3}
+              style={{ fill: s.color, cursor: "pointer" }}
+              onClick={() => setHovered({ wt: s.wt, i, x: xScale(p.date), y: yScale(Number(p.basis)), value: Number(p.basis), date: p.date })}
+              onMouseEnter={() => setHovered({ wt: s.wt, i, x: xScale(p.date), y: yScale(Number(p.basis)), value: Number(p.basis), date: p.date })}
+            />
+          )))}
+
+          {series.map((s) => {
+            if (s.points.length === 0) return null;
+            const last = s.points[s.points.length - 1];
+            const lx = xScale(last.date), ly = yScale(Number(last.basis));
+            return (
+              <text key={s.wt + "-callout"} x={Math.min(lx + 8, width - padRight - 44)} y={ly - 8} className="mono" style={{ fontSize: 11, fill: s.color, fontWeight: 600 }}>
+                {fmtC(Number(last.basis))}
+              </text>
+            );
+          })}
+
+          {hovered && (() => {
+            const s = series.find((x) => x.wt === hovered.wt);
+            if (!s) return null;
+            return <Tooltip x={hovered.x} y={hovered.y} label={hovered.wt === "Soft White Winter" ? "Soft White" : "Hard Red"} value={hovered.value} dateLabel={formatDate(hovered.date)} />;
+          })()}
+        </svg>
+        <div style={{ display: "flex", gap: 16, marginTop: 8, flexWrap: "wrap" }}>
+          {WHEAT_TYPES.map((wt) => (
+            <button key={wt} onClick={() => setVisible((v) => ({ ...v, [wt]: !v[wt] }))} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", opacity: visible[wt] ? 1 : 0.4 }}>
+              <span style={{ width: 10, height: 10, background: colors[wt], borderRadius: 2, display: "inline-block" }}></span>
+              <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{wt} ({sourceLabel})</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // ---- COMPARE YEARS MODE ----
+  const compareRows = baseByType[compareType] || [];
+  const byYear = {};
+  compareRows.forEach((r) => {
+    const yr = r.date.slice(0, 4);
+    (byYear[yr] ||= []).push(r);
+  });
+  const years = Object.keys(byYear).sort();
+
+  if (years.length === 0 || compareRows.length < 2) {
+    return (
+      <div className="card">
+        <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Basis Over Time</h3>
+        {controls}
+        <p className="mono" style={{ fontSize: 12, color: "var(--muted2)" }}>Not enough logged data for {compareType} ({sourceLabel}) yet to compare across years.</p>
+      </div>
+    );
+  }
+
+  const allBasisVals = compareRows.map((r) => Number(r.basis));
+  let minB2 = Math.min(...allBasisVals), maxB2 = Math.max(...allBasisVals);
+  if (minB2 === maxB2) { minB2 -= 0.1; maxB2 += 0.1; }
+  const pad2 = (maxB2 - minB2) * 0.15;
+  minB2 -= pad2; maxB2 += pad2;
+
+  const xScaleCmp = (doy) => padLeft + (doy / 365) * plotW;
+  const yScaleCmp = (v) => padTop + plotH - ((v - minB2) / (maxB2 - minB2)) * plotH;
+  const gridValues2 = Array.from({ length: 5 }, (_, i) => minB2 + (i / 4) * (maxB2 - minB2));
 
   return (
     <div className="card">
       <h3 className="disp" style={{ margin: 0, color: "var(--blue)", textTransform: "uppercase", fontSize: 14 }}>Basis Over Time</h3>
-      <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", height: "auto", marginTop: 8 }}>
-        {gridValues.map((v, i) => (
+      {controls}
+      <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", height: "auto" }}>
+        <rect x={0} y={0} width={width} height={height} fill="transparent" onClick={() => setHovered(null)} />
+        {gridValues2.map((v, i) => (
           <g key={i}>
-            <line x1={padLeft} x2={width - padRight} y1={yScale(v)} y2={yScale(v)} style={{ stroke: "var(--border)" }} strokeDasharray={Math.abs(v) < 1e-9 ? "0" : "3 3"} strokeWidth={Math.abs(v) < 1e-9 ? 1.5 : 1} />
-            <text x={padLeft - 6} y={yScale(v) + 3} textAnchor="end" className="mono" style={{ fontSize: 10, fill: "var(--muted2)" }}>{fmtC(v)}</text>
+            <line x1={padLeft} x2={width - padRight} y1={yScaleCmp(v)} y2={yScaleCmp(v)} style={{ stroke: "var(--border)" }} strokeDasharray={Math.abs(v) < 1e-9 ? "0" : "3 3"} strokeWidth={Math.abs(v) < 1e-9 ? 1.5 : 1} />
+            <text x={padLeft - 6} y={yScaleCmp(v) + 3} textAnchor="end" className="mono" style={{ fontSize: 10, fill: "var(--muted2)" }}>{fmtC(v)}</text>
+          </g>
+        ))}
+        {MONTH_STARTS.map((doy, i) => (
+          <g key={doy}>
+            <line x1={xScaleCmp(doy)} x2={xScaleCmp(doy)} y1={padTop} y2={height - padBottom} style={{ stroke: "var(--border)" }} strokeDasharray="2 4" strokeWidth={0.75} />
+            <text x={xScaleCmp(doy)} y={height - padBottom + 16} textAnchor="middle" className="mono" style={{ fontSize: 10, fill: "var(--muted2)" }}>{MONTH_ABBR[i]}</text>
           </g>
         ))}
 
-        {weekTicks.map((d, i) => (
-          <g key={d + i}>
-            <line x1={xScale(d)} x2={xScale(d)} y1={padTop} y2={height - padBottom} style={{ stroke: "var(--border)" }} strokeDasharray="2 4" strokeWidth={0.75} />
-            <text
-              x={xScale(d)}
-              y={height - padBottom + 16}
-              textAnchor="middle"
-              className="mono"
-              style={{ fontSize: 10, fill: "var(--muted2)" }}
-            >
-              {formatDate(d)}
-            </text>
-          </g>
-        ))}
+        {years.map((yr, yi) => {
+          const pts = byYear[yr];
+          const color = yearPalette[yi % yearPalette.length];
+          return (
+            <g key={yr}>
+              {pts.length >= 2 && (
+                <polyline fill="none" strokeWidth="2" style={{ stroke: color }}
+                  points={pts.map((p) => `${xScaleCmp(dayOfYear(p.date))},${yScaleCmp(Number(p.basis))}`).join(" ")} />
+              )}
+              {pts.map((p, i) => (
+                <circle key={i} cx={xScaleCmp(dayOfYear(p.date))} cy={yScaleCmp(Number(p.basis))} r={hovered && hovered.wt === yr && hovered.i === i ? 5 : 3}
+                  style={{ fill: color, cursor: "pointer" }}
+                  onClick={() => setHovered({ wt: yr, i, x: xScaleCmp(dayOfYear(p.date)), y: yScaleCmp(Number(p.basis)), value: Number(p.basis), date: p.date })}
+                  onMouseEnter={() => setHovered({ wt: yr, i, x: xScaleCmp(dayOfYear(p.date)), y: yScaleCmp(Number(p.basis)), value: Number(p.basis), date: p.date })}
+                />
+              ))}
+            </g>
+          );
+        })}
 
-        {series.map((s) => s.points.length >= 2 && (
-          <polyline
-            key={s.wt}
-            fill="none"
-            strokeWidth="2"
-            style={{ stroke: s.color }}
-            points={s.points.map((p) => `${xScale(p.date)},${yScale(Number(p.basis))}`).join(" ")}
-          />
-        ))}
-        {series.map((s) => s.points.map((p, i) => (
-          <circle key={s.wt + i} cx={xScale(p.date)} cy={yScale(Number(p.basis))} r="3" style={{ fill: s.color }} />
-        )))}
+        {hovered && years.includes(hovered.wt) && (
+          <Tooltip x={hovered.x} y={hovered.y} label={hovered.wt} value={hovered.value} dateLabel={new Date(hovered.date + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" })} />
+        )}
       </svg>
       <div style={{ display: "flex", gap: 16, marginTop: 8, flexWrap: "wrap" }}>
-        {series.map((s) => (
-          <div key={s.wt} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ width: 10, height: 10, background: s.color, borderRadius: 2, display: "inline-block" }}></span>
-            <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{s.wt}{s.nearest ? ` (${s.nearest})` : " (general/nearby)"}</span>
+        {years.map((yr, yi) => (
+          <div key={yr} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ width: 10, height: 10, background: yearPalette[yi % yearPalette.length], borderRadius: 2, display: "inline-block" }}></span>
+            <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{yr}</span>
           </div>
         ))}
       </div>
+      <p className="mono note">Lines are aligned by month/day so you can see where this year's basis sits versus prior years at the same point in the season.</p>
     </div>
   );
 }
